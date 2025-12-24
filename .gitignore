@@ -1,0 +1,29 @@
+# Environment
+.env
+
+# Molecular/Data Files
+*.csv
+*.pdbqt
+*.pdb
+*.pkl
+
+# Python
+__init__.cpython*
+*.pyc
+.pytest_cache/
+
+# Build/Package
+gromacs-2024.4*
+**.egg-info
+
+# Directories
+agent_data/
+tests/*deprecated*
+docs/plans
+
+# Specific Files
+.log
+**/*temp*
+
+# System
+**.DS_Store

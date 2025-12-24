@@ -1,0 +1,18 @@
+ADAMS (Agent-Driven Autonomous Molecular Simulations)
+Copyright (c) Rhizome Research
+
+This product includes software developed and/or distributed by third parties.
+
+Vina-GPU 2.1
+-----------
+This distribution includes the following Vina-GPU 2.1 artifacts used for GPU docking:
+
+- adams/pipeline/docking/vina_gpu/AutoDock-Vina-GPU-2-1
+- adams/pipeline/docking/vina_gpu/Kernel1_Opt.bin
+- adams/pipeline/docking/vina_gpu/Kernel2_Opt.bin
+
+These files were obtained from the Vina-GPU 2.1 project and are redistributed under the
+Apache License 2.0:
+https://github.com/DeltaGroupNJUPT/Vina-GPU-2.1
+
+

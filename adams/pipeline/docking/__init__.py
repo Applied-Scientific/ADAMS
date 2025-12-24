@@ -1,0 +1,3 @@
+"""
+Search and docking functionality
+"""

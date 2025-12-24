@@ -6,10 +6,10 @@
 import logging
 import os
 import shutil
+import stat
 import textwrap
 from getpass import getpass
 from pathlib import Path
-import stat
 
 from agents import Runner, SQLiteSession
 from prompt_toolkit import prompt

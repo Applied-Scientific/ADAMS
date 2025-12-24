@@ -9,5 +9,3 @@ recursive-include adams *.md *.mdp
 # Include Vina-GPU artifacts shipped with the package
 recursive-include adams *.bin
 include adams/pipeline/docking/vina_gpu/AutoDock-Vina-GPU-2-1
-
-

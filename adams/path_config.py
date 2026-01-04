@@ -39,6 +39,22 @@ def validate_path_safety(target_path: Path, base_path: Optional[Path] = None) ->
 
     Raises:
         PermissionError: If the target_path is outside the base_path
+
+    Examples:
+        Validating a path inside the allowed base directory:
+
+            >>> from pathlib import Path
+            >>> base = Path("/safe/root")
+            >>> validate_path_safety(base / "subdir/file.txt", base)  # no exception
+
+        Preventing a path traversal attack (escaping the base directory):
+
+            >>> from pathlib import Path
+            >>> base = Path("/safe/root")
+            >>> validate_path_safety(base / "../secret.txt", base)
+            Traceback (most recent call last):
+                ...
+            PermissionError: Access denied: Path '...
     """
     if base_path is None:
         base_path = Path.cwd()

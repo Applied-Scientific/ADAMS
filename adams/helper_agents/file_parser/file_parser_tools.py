@@ -5,12 +5,12 @@
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
 
-from ...path_config import get_agent_data_path
+from ...path_config import get_agent_data_path, get_safe_path
 
 
 def parse_docking_results_impl(csv_path: str) -> Dict[str, Any]:
@@ -40,10 +40,19 @@ def parse_docking_results_impl(csv_path: str) -> Dict[str, Any]:
     base_path = get_agent_data_path()
 
     # Handle relative vs absolute paths
-    if os.path.isabs(csv_path):
-        target = Path(csv_path)
-    else:
-        target = base_path / csv_path
+    try:
+        target = get_safe_path(csv_path, base_path)
+    except PermissionError as e:
+        return {
+            "csv_path": csv_path,
+            "statistics": {},
+            "counts": {},
+            "pocket_stats": {},
+            "top_pockets": [],
+            "affinity_percentiles": {},
+            "affinity_ranges": {},
+            "error": str(e),
+        }
 
     result = {
         "csv_path": str(target),
@@ -164,10 +173,21 @@ def parse_md_results_impl(md_dir: str) -> Dict[str, Any]:
     base_path = get_agent_data_path()
 
     # Handle relative vs absolute paths
-    if os.path.isabs(md_dir):
-        target = Path(md_dir)
-    else:
-        target = base_path / md_dir
+    try:
+        target = get_safe_path(md_dir, base_path)
+    except PermissionError as e:
+        return {
+            "md_dir": md_dir,
+            "completion_status": {},
+            "pose_statistics": {},
+            "file_paths": {
+                "protein_gro": None,
+                "protein_top": None,
+                "analysis_reports": [],
+                "pose_directories": [],
+            },
+            "error": str(e),
+        }
 
     result = {
         "md_dir": None,

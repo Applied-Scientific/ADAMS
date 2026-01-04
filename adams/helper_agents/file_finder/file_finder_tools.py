@@ -7,6 +7,8 @@ import csv
 import os
 from pathlib import Path
 
+from ...path_config import get_safe_path
+
 
 def scan_directory_impl(path: str = "") -> dict:
     """
@@ -23,10 +25,13 @@ def scan_directory_impl(path: str = "") -> dict:
             - 'error': Error message if any
     """
     base_path = Path.cwd()
-    if path:
-        target = base_path / path
-    else:
-        target = base_path
+    try:
+        if path:
+            target = get_safe_path(path, base_path)
+        else:
+            target = base_path
+    except PermissionError as e:
+        return {"path": path, "files": [], "directories": [], "error": str(e)}
 
     result = {"path": str(target), "files": [], "directories": [], "error": None}
 
@@ -73,10 +78,16 @@ def read_csv_headers_impl(file_path: str) -> dict:
     base_path = Path.cwd()
 
     # Handle relative vs absolute paths
-    if os.path.isabs(file_path):
-        target = Path(file_path)
-    else:
-        target = base_path / file_path
+    try:
+        target = get_safe_path(file_path, base_path)
+    except PermissionError as e:
+        return {
+            "file_path": file_path,
+            "columns": [],
+            "row_count": 0,
+            "sample_values": {},
+            "error": str(e),
+        }
 
     result = {
         "file_path": str(target),
@@ -131,10 +142,18 @@ def check_file_exists_impl(file_path: str) -> dict:
     """
     base_path = Path.cwd()
 
-    if os.path.isabs(file_path):
-        target = Path(file_path)
-    else:
-        target = base_path / file_path
+    try:
+        target = get_safe_path(file_path, base_path)
+    except PermissionError as e:
+        return {
+            "file_path": file_path,
+            "exists": False,
+            "is_file": False,
+            "is_directory": False,
+            "size_bytes": None,
+            "extension": None,
+            "error": str(e),
+        }
 
     return {
         "file_path": str(target),
@@ -165,10 +184,18 @@ def check_directory_contents_impl(dir_path: str, required_files: str) -> dict:
     """
     base_path = Path.cwd()
 
-    if os.path.isabs(dir_path):
-        target = Path(dir_path)
-    else:
-        target = base_path / dir_path
+    try:
+        target = get_safe_path(dir_path, base_path)
+    except PermissionError as e:
+        return {
+            "dir_path": dir_path,
+            "exists": False,
+            "required_files": [f.strip() for f in required_files.split(",")],
+            "found_files": [],
+            "missing_files": [],
+            "all_present": False,
+            "error": str(e),
+        }
 
     required = [f.strip() for f in required_files.split(",")]
 
@@ -211,10 +238,15 @@ def read_file_preview_impl(file_path: str, lines: int = 20) -> dict:
     """
     base_path = Path.cwd()
 
-    if os.path.isabs(file_path):
-        target = Path(file_path)
-    else:
-        target = base_path / file_path
+    try:
+        target = get_safe_path(file_path, base_path)
+    except PermissionError as e:
+        return {
+            "file_path": file_path,
+            "content": "",
+            "total_lines": 0,
+            "error": str(e),
+        }
 
     result = {"file_path": str(target), "content": "", "total_lines": 0, "error": None}
 

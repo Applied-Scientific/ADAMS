@@ -18,6 +18,7 @@ Usage in code:
     agent_data_path = get_agent_data_path()
 """
 
+import os
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,96 @@ from typing import Optional
 _agent_data_path: ContextVar[Optional[Path]] = ContextVar(
     "agent_data_path", default=None
 )
+
+
+def validate_path_safety(target_path: Path, base_path: Optional[Path] = None) -> None:
+    """
+    Ensure a path is contained within an allowed base directory.
+
+    Args:
+        target_path: The path to validate
+        base_path: The allowed root directory. If None, uses current working directory.
+
+    Raises:
+        PermissionError: If the target_path is outside the base_path
+
+    Examples:
+        Validating a path inside the allowed base directory:
+
+            >>> from pathlib import Path
+            >>> base = Path("/safe/root")
+            >>> validate_path_safety(base / "subdir/file.txt", base)  # no exception
+
+        Preventing a path traversal attack (escaping the base directory):
+
+            >>> from pathlib import Path
+            >>> base = Path("/safe/root")
+            >>> validate_path_safety(base / "../secret.txt", base)
+            Traceback (most recent call last):
+                ...
+            PermissionError: Access denied: Path '...
+    """
+    if base_path is None:
+        base_path = Path.cwd()
+
+    safe_root = base_path.resolve()
+    resolved_target = target_path.resolve()
+
+    if not resolved_target.is_relative_to(safe_root):
+        raise PermissionError(
+            f"Access denied: Path '{target_path}' resolves to '{resolved_target}' "
+            f"which is outside the allowed directory '{safe_root}'"
+        )
+
+
+def get_safe_path(user_path: str, base_path: Optional[Path] = None) -> Path:
+    """
+    Resolve a user-provided path and validate its safety.
+
+    Args:
+        user_path: The user-provided path string (can be absolute or relative)
+        base_path: The allowed root directory. If None, uses current working directory.
+
+    Returns:
+        Path: The confirmed safe absolute path
+
+    Raises:
+        PermissionError: If the resolved path is outside base_path
+
+    Examples:
+        Basic usage with a relative path (resolved against the base path)::
+
+            >>> from pathlib import Path
+            >>> base = Path("/data/project")
+            >>> get_safe_path("inputs/file.txt", base_path=base)
+            PosixPath('/data/project/inputs/file.txt')
+
+        Absolute path inside the allowed base directory is accepted::
+
+            >>> from pathlib import Path
+            >>> base = Path("/data/project")
+            >>> get_safe_path("/data/project/inputs/file.txt", base_path=base)
+            PosixPath('/data/project/inputs/file.txt')
+
+        Absolute path outside the allowed base directory raises PermissionError::
+
+            >>> from pathlib import Path
+            >>> base = Path("/data/project")
+            >>> get_safe_path("/etc/passwd", base_path=base)
+            Traceback (most recent call last):
+            ...
+            PermissionError: Access denied: Path '/etc/passwd' resolves to ...
+    """
+    if base_path is None:
+        base_path = Path.cwd()
+
+    if os.path.isabs(user_path):
+        target = Path(user_path)
+    else:
+        target = base_path / user_path
+
+    validate_path_safety(target, base_path)
+    return target.resolve()
 
 
 def set_agent_data_path(

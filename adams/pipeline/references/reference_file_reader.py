@@ -6,6 +6,8 @@ from pathlib import Path
 
 from agents import function_tool
 
+from ...path_config import validate_path_safety
+
 
 def read_reference_file_impl(reference_name: str) -> dict:
     """
@@ -30,6 +32,16 @@ def read_reference_file_impl(reference_name: str) -> dict:
         reference_name = reference_name + ".md"
 
     file_path = references_dir / reference_name
+
+    try:
+        validate_path_safety(file_path, references_dir)
+    except PermissionError as e:
+        return {
+            "reference_name": reference_name,
+            "file_path": str(file_path),
+            "content": None,
+            "error": str(e),
+        }
 
     result = {
         "reference_name": reference_name,

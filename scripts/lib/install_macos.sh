@@ -81,9 +81,9 @@ install_step_conda_deps() {
     step "Step 2: Installing conda dependencies"
     ensure_env_active || return 1
 
-    info "Installing rdkit, openbabel, openmm, pdbfixer, jupyter, ipykernel, ipywidgets..."
+    info "Installing boost, swig, rdkit, openbabel, openmm, pdbfixer, jupyter, ipykernel, ipywidgets..."
     run_cmd "Installing molecular simulation packages" \
-        "$CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer jupyter ipykernel ipywidgets" || {
+        "$CONDA_CMD install -y -c conda-forge boost swig rdkit openbabel openmm pdbfixer jupyter ipykernel ipywidgets" || {
         error "Failed to install conda dependencies"
         echo ""
         echo "Suggestions:"

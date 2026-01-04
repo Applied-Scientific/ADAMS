@@ -82,6 +82,30 @@ def get_safe_path(user_path: str, base_path: Optional[Path] = None) -> Path:
 
     Raises:
         PermissionError: If the resolved path is outside base_path
+
+    Examples:
+        Basic usage with a relative path (resolved against the base path)::
+
+            >>> from pathlib import Path
+            >>> base = Path("/data/project")
+            >>> get_safe_path("inputs/file.txt", base_path=base)
+            PosixPath('/data/project/inputs/file.txt')
+
+        Absolute path inside the allowed base directory is accepted::
+
+            >>> from pathlib import Path
+            >>> base = Path("/data/project")
+            >>> get_safe_path("/data/project/inputs/file.txt", base_path=base)
+            PosixPath('/data/project/inputs/file.txt')
+
+        Absolute path outside the allowed base directory raises PermissionError::
+
+            >>> from pathlib import Path
+            >>> base = Path("/data/project")
+            >>> get_safe_path("/etc/passwd", base_path=base)
+            Traceback (most recent call last):
+            ...
+            PermissionError: Access denied: Path '/etc/passwd' resolves to ...
     """
     if base_path is None:
         base_path = Path.cwd()

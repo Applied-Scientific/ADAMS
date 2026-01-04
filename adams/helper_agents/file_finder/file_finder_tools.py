@@ -4,7 +4,6 @@
 """
 
 import csv
-import os
 from pathlib import Path
 
 from ...path_config import get_safe_path

@@ -35,7 +35,7 @@ def scan_directory(path: str = "") -> dict:
         path (str): Path to scan, relative to the current working directory.
             Empty string ("") scans the current working directory.
             Example: "" for root, "outputs" for outputs subdirectory,
-            "outputs/run_20251203/md_analysis" for nested path.
+            "outputs/run_20251203/docking" for nested path.
 
     Returns:
         dict: Dictionary containing:
@@ -57,6 +57,7 @@ def scan_directory(path: str = "") -> dict:
         >>> result = scan_directory("outputs")
         >>> # Scans the ./outputs directory
     """
+    print(f"[Agent] Scanning directory: {path if path else 'current directory'}...")
     return scan_directory_impl(path)
 
 
@@ -95,6 +96,7 @@ def read_csv_headers(file_path: str) -> dict:
         >>> result = read_csv_headers("docking_centers.csv")
         >>> # Returns column names like ['center_x', 'center_y', 'center_z'] for docking centers
     """
+    print(f"[Agent] Reading CSV headers: {file_path}")
     return read_csv_headers_impl(file_path)
 
 
@@ -131,6 +133,7 @@ def check_file_exists(file_path: str) -> dict:
         >>> result = check_file_exists("nonexistent.txt")
         >>> # Returns: {'exists': False, 'is_file': False, ...}
     """
+    print(f"[Agent] Checking existence: {file_path}")
     return check_file_exists_impl(file_path)
 
 
@@ -140,20 +143,19 @@ def check_directory_contents(dir_path: str, required_files: str) -> dict:
     Check if a directory contains specific required files.
 
     This function verifies that a directory contains all specified files. It's particularly
-    useful for checking pose directories that should contain specific MD simulation files
-    (e.g., min.gro, system.top, index.ndx) or completed MD directories (md.tpr, md.xtc, md.gro).
+    useful for checking that directories contain required output files (e.g., docking summaries).
 
     Use this when:
-    - You need to verify a pose directory has all required files for MD simulation
-    - You want to check if an MD directory has completed simulation files
+    - You need to verify a directory has all required files
+    - You want to check if a directory has expected output files
     - You need to validate directory completeness before proceeding
 
     Args:
         dir_path (str): Path to directory to check. Can be relative to the current
             working directory or an absolute path. Example:
-            "agent_data/run_20251203/md_analysis/poses/ligand_pocket_0_top1"
+            "agent_data/run_20251203/docking/production/summaries"
         required_files (str): Comma-separated list of required file names.
-            Example: "min.gro,system.top,index.ndx" or "md.tpr,md.xtc,md.gro"
+            Example: "production_docking_results.csv,docking_centers.csv"
             Files are checked by exact name match (case-sensitive).
 
     Returns:
@@ -166,12 +168,10 @@ def check_directory_contents(dir_path: str, required_files: str) -> dict:
             - 'all_present' (bool): True if all required files exist, False otherwise
 
     Example:
-        >>> result = check_directory_contents("agent_data/run_1/poses/ligand_1", "min.gro,system.top,index.ndx")
-        >>> # Returns: {'all_present': True, 'found_files': ['min.gro', 'system.top', 'index.ndx'], ...}
-
-        >>> result = check_directory_contents("agent_data/run_1/md_analysis/poses/ligand1", "md.tpr,md.xtc,md.gro")
-        >>> # Checks for completed MD simulation files
+        >>> result = check_directory_contents("agent_data/run_1/docking/production/summaries", "production_docking_results.csv")
+        >>> # Returns: {'all_present': True, 'found_files': ['production_docking_results.csv'], ...}
     """
+    print(f"[Agent] Verifying directory contents: {dir_path}")
     return check_directory_contents_impl(dir_path, required_files)
 
 
@@ -210,6 +210,7 @@ def read_file_preview(file_path: str, lines: int = 20) -> dict:
         >>> result = read_file_preview("docking_results.csv", lines=5)
         >>> # Returns first 5 lines including header
     """
+    print(f"[Agent] Reading file preview: {file_path}")
     return read_file_preview_impl(file_path, lines)
 
 

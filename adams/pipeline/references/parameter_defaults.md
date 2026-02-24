@@ -7,8 +7,34 @@ This document provides default parameter values and guidelines for pipeline oper
 
 ### run_clean_pdb
 - **outpath**: `"./output"` (default)
-- **chain_to_keep**: `"A"` (default, most common)
+- **chain_to_keep**: `"all"` (default, keep complete receptor assembly). Also supports `"A"` (single-chain mode) and `"A,B,C"` / `["A","B","C"]` (selected chains).
 - **ligand**: `False` (default, only enable when user explicitly requests ligand extraction)
+- **keep_water**: `False` (default; set `True` to retain structural waters and carry them into protonated receptor output)
+- **keep_heterogens**: `"essential"` (default) = keep ESSENTIAL_HETEROGENS_TO_KEEP (built-in cofactors, metal ions, nucleotides; see preprocessing_agent_prompt or clean_pdb.py). `None` or `[]` = remove all. List or single 3-letter str (e.g. `["HEM", "MG"]` or `"HEM"`) = keep only those.
+- **model_missing_residues**: `True` (default). Attempt to model selected missing-residue blocks.
+- **max_missing_residues_per_gap**: `12` (default). Larger missing blocks are left as chain gaps.
+- **allow_terminal_missing_residues**: `False` (default). Terminal missing stretches are left as gaps unless explicitly enabled.
+- **pH**: `7.4` (default) = pH value for protein protonation state. Used in run_protonate_receptor to determine protonation states.
+
+### run_smiles_to_pdbqt (2D ligands → PDBQT + mapping CSV)
+- **output_dir**: `"output"` (default)
+- **num_confs**: `8` (default). Number of conformers generated per molecule before pruning.
+- **max_confs_to_keep**: `2` (default). Retain only lowest-energy conformers per molecule.
+- **conformer_energy_window_kcal**: `3.0` (default). Keep conformers within this window from best.
+- **random_seed**: `42` (default). Use for reproducible conformers; change only if user needs a different conformer set.
+
+### run_ligand_preprocessing (microstate defaults)
+- **enumerate_microstates**: `True` (default)
+- **pH_min / pH_max**: `6.4 / 8.4` (default, centered around physiological pH)
+- **protonation_precision**: `0.5` (default)
+- **max_generated_tautomers**: `64` (default, set to `None` to disable hard generation cap)
+- **top_tautomers_per_protomer**: `2` (default)
+- **tautomer_energy_window_kcal**: `3.0` (default)
+- **max_protomers**: `16` (default)
+- **max_stereoisomers**: `16` (default)
+- **max_unassigned_stereocenters**: `2` (default)
+- **max_total_microstates**: `64` (default)
+- **enumerate_all_stereocenters**: `False` (default, preserve assigned stereochemistry)
 
 ### run_ligand_preprocessing
 - **molwt_upper_bound**: `800` Da (default, typical range: 500-1000)
@@ -33,56 +59,25 @@ This document provides default parameter values and guidelines for pipeline oper
 - **affinity_cutoff**: `-4.0` kcal/mol (default)
 
 ### run_vina_dock (production mode)
+- **Pocket definition is mandatory**: provide one of `docking_centers_file`, `complex`, or `docking_centers`. Production mode no longer defaults to `[0,0,0]`.
 - **num_pockets**: Match `top_n_clusters` from search step
 - **num_poses**: `5` (default)
-- **search_gridsize**: `25.0` Å (default)
+- **production_gridsize**: `None` (default = backend default sizing; set explicit Å value to force a fixed production box)
+- **lock_grid_center**: `True` (default, keep production docking maps centered on user pocket center after pre-minimize)
 - **num_cores**: `None` (default, auto-detects CPU_count - 1)
+- **pH**: `7.4` (default) = pH value for receptor protonation state when converting PDB to PDBQT.
+
+### Docking charge model
+- **Ligand**: Meeko uses `charge_model="gasteiger"` (default) when generating PDBQT in `run_smiles_to_pdbqt` and `convert_3d_to_pdbqt`.
+- **Receptor**: OpenBabel uses `--partialcharge gasteiger` (default) in `convert_receptor_to_pdbqt`.
+- Default is `gasteiger` for both for consistency. Override via `run_docking(charge_model=...)` and, for ligand prep, `run_smiles_to_pdbqt(charge_model=...)` or `run_standardize_ligand_data(charge_model=...)` (3D path).
+- **pH** 7.4 remains the default for receptor protonation (unchanged).
 
 ### run_vina_dock_gpu (GPU)
 - **num_pockets**: Match `top_n_clusters` from search step
-- **num_gpus**: `1` (default, or use user's specified value)
-- **gpu_ids**: `None` (default, or use user's specified list)
+- **num_gpus**: `None` (default = auto-detect all available GPUs unless user explicitly requests a count)
+- **gpu_ids**: `None` (default; set only when user explicitly requests specific GPU IDs)
 - **search_gridsize**: `None` (default, auto-calculates from MolWt)
-
-## MD Analysis Parameters
-
-### ProteinTopologyConfig
-- **forcefield**: `"amber03"` (default, always set explicitly unless user requests otherwise)
-- **water_model**: Function default
-- **ignore_hydrogens**: Function default
-- **gromacs_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-- **ambertools_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-
-### LigPrepareConfig
-- **tops**: `3` (default, number of ligands to carry into MD)
-- **num_cores**: Function default (or use user's core budget)
-- **charge_type**: Function default
-- **water_margin**: Function default
-- **ion_conc**: Function default
-- **gromacs_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-- **ambertools_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-
-### GroConfig
-- **gpu**: `False` (default, set to True if user requests GPU)
-- **mpi_ranks**: `8` (default, or map from num_cores)
-- **omp_threads**: `4` (default, or map from num_cores)
-- **max_jobs**: Function default
-- **gromacs_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-- **ambertools_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-
-### StabilityAnalysisConfig
-- **prefix**: Function default
-- **Range**: `"all"` (default, or `"last"` to use last_frames)
-- **last_frames**: Function default
-- **vina_report**: Point to production docking results CSV
-- **gromacs_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-- **ambertools_path**: Auto-detected from `$CONDA_PREFIX` if not provided
-
-### Common MD Parameter
-- **gromacs_binary_type**: `"standard"` (default)
-  - `"standard"`: Use standard GROMACS binary (gmx)
-  - `"mpi"`: Use MPI-enabled binary (gmx_mpi) for multi-rank CPU MD
-  - `"cuda"`: Use CUDA binary (gmx from cuda/bin) for GPU-accelerated MD
 
 ## Resource Usage Defaults
 
@@ -124,16 +119,9 @@ This document provides default parameter values and guidelines for pipeline oper
 
 ## Common Parameter Mappings
 
-### Core Budget Mapping (MD)
-If user says "I have 6 cores":
-- **LigPrepareConfig.num_cores**: 6
-- **GroConfig.mpi_ranks**: 6 (unless user specifies otherwise)
-- **GroConfig.omp_threads**: 1 (unless user specifies otherwise)
-
 ### GPU Request Mapping
 If user says "use GPU" or "use 2 GPUs":
 - **Docking**: Use `run_prod_docking_gpu` with `num_gpus=2`
-- **MD**: Set `gromacs_binary_type="cuda"` and `gpu=True` in GroConfig
 
 ### Sampling Request Mapping
 If user says "50% sampling":
@@ -145,8 +133,6 @@ If user says "50% sampling":
 ### Required Parameters
 - **Preprocessing**: `input_pdb`, `input_data`
 - **Docking**: `receptor`, `input_file`/`input_data`
-- **MD ProteinTopology**: `protein_file`
-- **MD LigPrepare**: `docking_csv`, `ligand_input`
 
 ### Optional Parameters
 - All other parameters have defaults and can be omitted

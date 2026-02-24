@@ -1,0 +1,380 @@
+Screen {
+    background: #0e0e16;
+    color: #cdd6f4;
+    scrollbar-size: 1 1;
+    scrollbar-background: #0e0e16;
+    scrollbar-color: #333333;
+    scrollbar-color-hover: #a6e3a1;
+    scrollbar-color-active: #a6e3a1;
+}
+
+/* Header - Data Bar Style */
+Header {
+    background: #0e0e16;
+    color: #9399b2;
+    height: 3;
+    content-align: center middle;
+    border-bottom: solid #1e1e2e;
+}
+
+Header > .header-clock {
+    color: #cdd6f4;
+    background: #11111b;
+    text-style: bold;
+}
+
+/* ── Sidebar ── */
+#sidebar {
+    dock: left;
+    width: 20;
+    background: #0e0e16;
+    border-right: solid #333333;
+    padding: 1 0;
+}
+
+#sidebar > Button {
+    width: 100%;
+    height: 3;
+    background: #0e0e16;
+    color: #6c7086;
+    border: none;
+    text-align: left;
+    content-align: left middle;
+    padding-left: 2;
+}
+
+#sidebar > Button:hover {
+    background: #181825;
+    color: #cdd6f4;
+    border-left: thick #45475a;
+}
+
+#sidebar > Button.-active {
+    background: #181825;
+    color: #a6e3a1;
+    border-left: thick #a6e3a1;
+    text-style: bold;
+}
+
+/* ── Main Content Area ── */
+#content {
+    background: #0e0e16;
+    padding: 1 2;
+}
+
+#content-area {
+    padding: 1 2;
+}
+
+/* ── Dashboard Cards ── */
+.card {
+    background: #181825;
+    border: none;
+    padding: 1 2;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.card-title {
+    color: #9399b2;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+/* ── Metrics (now inline bar) ── */
+.metrics-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.metric-card {
+    background: #181825;
+    border: none;
+    padding: 1 2;
+    margin-right: 1;
+    height: auto;
+    width: 1fr;
+}
+
+.metric-title {
+    color: #9399b2;
+    text-style: bold;
+    margin-bottom: 0;
+}
+
+.metric-value {
+    color: #a6e3a1;
+    text-style: bold;
+}
+
+/* ── Model Tag Badge ── */
+.model-tag {
+    margin-left: 2;
+    text-style: bold;
+}
+
+/* ── Status Row ── */
+.status-row {
+    height: auto;
+    margin-bottom: 0;
+}
+
+/* ── Stage Indicator ── */
+.stage-indicator {
+    color: #cba6f7;
+    margin-top: 1;
+}
+
+/* ── Chat History ── */
+#chat-history {
+    height: 1fr;
+    layout: vertical;
+    overflow-y: scroll;
+}
+
+.message-user, .message-agent {
+    height: auto;
+    margin-bottom: 1;
+}
+
+AgentStatusPanel {
+    height: 4;
+    background: #11111b;
+    border-top: solid #1e1e2e;
+    padding: 0 1;
+    margin-bottom: 0;
+}
+
+/* ── Bottom Input Bar ── */
+#input-container {
+    height: auto;
+    background: transparent;
+    padding: 0 2 1 2;
+    margin-top: 0;
+    border-top: solid #333333;
+    layout: horizontal;
+}
+
+#input-container > Input {
+    width: 1fr;
+}
+
+/* ── Stop Button ── */
+.stop-btn {
+    width: 12;
+    height: 3;
+    background: #f38ba8;
+    color: #11111b;
+    border: none;
+    text-style: bold;
+    margin-left: 1;
+}
+
+.stop-btn:hover {
+    background: #eba0ac;
+}
+
+Input {
+    background: #11111b;
+    border: tall #45475a;
+    color: #cdd6f4;
+    width: 100%;
+}
+
+Input:focus {
+    border: tall #a6e3a1;
+    color: #ffffff;
+    background: #181825;
+}
+
+Input:disabled {
+    color: #585b70;
+    background: #0e0e16;
+    border: tall #1e1e2e;
+}
+
+/* ── Modals ── */
+ModalScreen {
+    align: center middle;
+    background: rgba(0,0,0,0.8);
+}
+
+#api-key-dialog {
+    padding: 2 4;
+    width: 60;
+    height: auto;
+    background: #1e1e2e;
+    border: solid #a6e3a1;
+}
+
+#api-key-dialog > Label {
+    margin-bottom: 2;
+    text-align: center;
+    width: 100%;
+}
+
+#api-key-dialog > Input {
+    border: solid #45475a;
+    background: #11111b;
+    margin-bottom: 2;
+}
+
+#api-key-dialog > Input:focus {
+    border: solid #a6e3a1;
+}
+
+#api-key-dialog > Button {
+    width: 100%;
+    background: #a6e3a1;
+    color: #11111b;
+    border: none;
+    text-style: bold;
+}
+
+#api-key-dialog > Button:hover {
+    background: #94e2d5;
+}
+
+/* ── Dialog Buttons ── */
+.dialog-buttons {
+    layout: horizontal;
+    height: 3;
+    width: 100%;
+    align: center middle;
+    margin-top: 1;
+}
+
+.dialog-buttons Button {
+    width: 45%;
+    margin: 0 1;
+    border: none;
+    text-style: bold;
+}
+
+#btn-submit {
+    background: #a6e3a1;
+    color: #11111b;
+}
+#btn-submit:hover {
+    background: #94e2d5;
+}
+
+#btn-cancel {
+    background: #f38ba8;
+    color: #11111b;
+}
+#btn-cancel:hover {
+    background: #eba0ac;
+}
+
+/* ── Logs Screen ── */
+#logs-container {
+    height: 1fr;
+}
+
+#session-pane {
+    width: 35;
+    border-right: solid #333333;
+    height: 1fr;
+}
+
+#log-pane {
+    width: 1fr;
+    height: 1fr;
+}
+
+.pane-title {
+    color: #9399b2;
+    text-style: bold;
+    padding: 1 2;
+    background: #11111b;
+    border-bottom: solid #1e1e2e;
+}
+
+#session-list {
+    height: 1fr;
+    overflow-y: scroll;
+}
+
+#log-content {
+    height: 1fr;
+    background: #11111b;
+    padding: 1 2;
+}
+
+.session-label {
+    padding: 1 2;
+    height: auto;
+}
+
+/* ── ListView Selection Styling ── */
+ListView > ListItem {
+    background: transparent;
+    padding: 0;
+}
+
+ListView > ListItem:hover {
+    background: #181825;
+}
+
+ListView > ListItem.-highlight {
+    background: #1e1e2e;
+}
+
+/* ── Utility Classes ── */
+/* Dialog Buttons Container */
+.dialog-buttons {
+    layout: horizontal;
+    height: 3;
+    width: 100%;
+    align: center middle;
+    margin-top: 1;
+}
+
+.dialog-buttons Button {
+    width: 45%;
+    margin: 0 1;
+    border: none;
+    text-style: bold;
+}
+
+/* Specific Button Styles */
+#btn-submit {
+    background: #a6e3a1;
+    color: #11111b;
+}
+#btn-submit:hover {
+    background: #94e2d5;
+}
+
+#btn-cancel {
+    background: #f38ba8; /* Red */
+    color: #11111b;
+}
+#btn-cancel:hover {
+    background: #eba0ac;
+}
+
+/* Utility Classes */
+.status-online {
+    color: #a6e3a1;
+    text-style: bold;
+}
+
+.status-offline {
+    color: #f38ba8;
+    text-style: bold;
+}
+
+.hidden {
+    display: none;
+}
+
+.usage-stats {
+    padding: 0 2;
+    color: #9399b2;
+}
+
+.error-text {
+    color: #f38ba8;
+}

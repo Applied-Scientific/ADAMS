@@ -52,7 +52,6 @@ Orchestrates the complete molecular docking workflow by coordinating domain agen
 - `file_parser_agent` (sub-agent)
 - `preprocessing_agent` (sub-agent)
 - `docking_agent` (sub-agent)
-- `md_agent` (sub-agent)
 
 ---
 
@@ -62,7 +61,7 @@ Agents that orchestrate specific pipeline stages and perform computational workf
 
 **Shared Tools:**
 - `read_reference_file` (universal)
-- `file_parser_agent` (sub-agent) - Used by Docking and MD agents
+- `file_parser_agent` (sub-agent)
 
 #### Preprocessing Agent
 
@@ -84,25 +83,10 @@ Orchestrates docking: binding site discovery and molecular docking.
 **Tools:**
 - `read_reference_file` (universal)
 - `file_parser_agent` (sub-agent)
-- `run_vina_dock` - Molecular docking using AutoDock Vina (CPU-based, search_dock or production modes)
-- `run_vina_dock_gpu` - Production-level molecular docking on GPU
+- `run_docking` - Molecular docking with backend selection (vina, vina_gpu, unidock)
 - `run_find_pocket` - Clusters search docking results to identify binding pockets
 
-#### MD Agent
-
-**Location:** `adams/pipeline/md_analysis/md_agent.py` | **Model:** `gpt-5.2`
-
-Orchestrates MD analysis: protein topology, ligand preparation, MD simulations, and stability analysis.
-
-**Tools:**
-- `read_reference_file` (universal)
-- `file_parser_agent` (sub-agent)
-- `build_file_paths` - Builds file_paths dictionary from paths or discovers from existing MD directory
-- `discover_paths` - Discovers GROMACS and AmberTools installation paths
-- `run_protein_topology` - Prepares protein structure for MD simulation
-- `run_lig_prepare` - Prepares ligands for MD simulation
-- `run_gro` - Runs MD simulations (NVT, NPT, production)
-- `run_stability_analysis` - Analyzes MD trajectories for stability metrics
+*MD / stability analysis agent: coming soon in a future release.*
 
 ---
 
@@ -138,9 +122,8 @@ Extracts structured statistics from pipeline output files for parameter extracti
 **Tools:**
 - `read_reference_file` (universal)
 - `parse_docking_results` - Parses docking results CSV and extracts statistics
-- `parse_md_results` - Analyzes MD results directory and extracts completion status
 
-**Used by:** Docking Agent, MD Agent, Workflow Agent
+**Used by:** Docking Agent, Workflow Agent
 
 #### Meta Analysis Agent
 
@@ -188,10 +171,7 @@ Biophysics Controller Agent (Main Entry Point)
     │
     ├──→ Preprocessing Agent (Stage 1)
     │
-    ├──→ Docking Agent (Stage 2)
-    │    └──→ File Parser Agent (Result Analysis)
-    │
-    └──→ MD Agent (Stage 3)
+    └──→ Docking Agent (Stage 2)
          └──→ File Parser Agent (Result Analysis)
 ```
 
@@ -211,10 +191,8 @@ This table shows which agents can invoke which other agents as sub-agents.
 | **Workflow Agent** | `file_parser_agent` | Parse intermediate/final results |
 | | `preprocessing_agent` | Execute data preprocessing stage |
 | | `docking_agent` | Execute molecular docking stage |
-| | `md_agent` | Execute MD simulation stage |
 | **Preprocessing Agent** | *(none)* | Pure execution agent - uses direct tools only |
 | **Docking Agent** | `file_parser_agent` | Parse docking results for decision-making |
-| **MD Agent** | `file_parser_agent` | Parse MD results for decision-making |
 | **File Finder Agent** | *(none)* | Helper agent - no sub-agents |
 | **File Parser Agent** | *(none)* | Helper agent - no sub-agents |
 | **Meta Analysis Agent** | *(none)* | Helper agent - no sub-agents |
@@ -223,7 +201,7 @@ This table shows which agents can invoke which other agents as sub-agents.
 ### Key Patterns
 
 1. **Helper agents never call other agents** - They are leaf nodes in the hierarchy
-2. **File Parser Agent is the most reused** - Called by 4 different agents (Controller, Workflow, Docking, MD)
+2. **File Parser Agent is reused** - Called by Controller, Workflow, and Docking agents
 3. **Critical validation flow**: Biophysics Controller → Oversight Agent → Workflow Agent
 4. **Stage agents have limited sub-agents** - Domain agents mostly use direct computational tools
 
@@ -263,26 +241,23 @@ USER REQUEST
          │ • Coordinate stage agents sequentially │
          └────────────────────────────────────────┘
                           ↓
-    ┌──────────────┬──────────────┬──────────────┐
-    ↓              ↓              ↓              ↓
-┌─────────┐  ┌──────────┐  ┌────────────┐  ┌──────────┐
-│  FILE   │  │PREPROC   │  │  DOCKING   │  │    MD    │
-│ PARSER  │  │  AGENT   │  │   AGENT    │  │  AGENT   │
-│  AGENT  │  │          │  │            │  │          │
-├─────────┤  ├──────────┤  ├────────────┤  ├──────────┤
-│Parse    │  │Clean PDB │  │Find Pocket │  │Topology  │
-│results  │  │Process   │  │Run Docking │  │Lig Prep  │
-│Extract  │  │CSV data  │  │   ↓        │  │Run MD    │
-│stats    │  │Generate  │  │Parse       │  │Stability │
-│         │  │configs   │  │results ────┼──→Analysis  │
-│         │  │          │  │via File    │  │   ↓      │
-│         │  │          │  │Parser      │  │Parse via │
-│         │  │          │  │            │  │File      │
-│         │  │          │  │            │  │Parser    │
-└─────────┘  └──────────┘  └────────────┘  └──────────┘
-    ↑                            ↑              ↑
-    └────────────────────────────┴──────────────┘
-           (Called by multiple agents)
+    ┌──────────────┬──────────────┐
+    ↓              ↓              ↓
+┌─────────┐  ┌──────────┐  ┌────────────┐
+│  FILE   │  │PREPROC   │  │  DOCKING   │
+│ PARSER  │  │  AGENT   │  │   AGENT    │
+│  AGENT  │  │          │  │            │
+├─────────┤  ├──────────┤  ├────────────┤
+│Parse    │  │Clean PDB │  │Find Pocket │
+│results  │  │Process   │  │Run Docking │
+│Extract  │  │CSV data  │  │   ↓        │
+│stats    │  │Generate  │  │Parse       │
+│         │  │configs   │  │results via │
+│         │  │          │  │File Parser │
+└─────────┘  └──────────┘  └────────────┘
+    ↑                 ↑
+    └─────────────────┘
+    (Called by multiple agents)
 ```
 
 ### Agent Communication Pattern
@@ -292,15 +267,13 @@ USER REQUEST
 Workflow Agent coordinates:
   1. Preprocessing Agent (parallel if multiple receptors)
   2. Docking Agent (sequential: search → find_pocket → production)
-  3. MD Agent (sequential: topology → ligands → NVT → NPT → production → analysis)
 ```
 
-**Parallel Parsing:**
+**Parsing:**
 ```
-File Parser Agent can be called concurrently by:
+File Parser Agent can be called by:
   • Workflow Agent (checking overall progress)
   • Docking Agent (extracting best poses)
-  • MD Agent (verifying completion status)
 ```
 
 **Critical Decision Points:**

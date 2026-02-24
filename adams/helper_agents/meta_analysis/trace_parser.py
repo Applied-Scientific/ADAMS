@@ -33,7 +33,7 @@ def parse_trace_file_impl(trace_file: Optional[str] = None) -> Dict[str, Any]:
         - entry_point: Inferred entry point used
         - output_folder: Output folder path (or None)
         - log_file: Log file path (or None)
-        - completed_steps: List of completed steps (preprocessing, docking, md_analysis)
+        - completed_steps: List of completed steps (preprocessing, docking)
         - steps_with_errors: List of steps that had errors
         - file_paths: Dict with receptor, ligands_csv, docking_centers, docking_results
         - last_error: Last error message (or None)
@@ -144,13 +144,12 @@ def parse_trace_file_impl(trace_file: Optional[str] = None) -> Dict[str, Any]:
                     tool_output = event.get("output")
                     tool_error = event.get("error")
 
-                    # Extract output folder (prioritize out_folder, then outpath, then md_workdir)
+                    # Extract output folder (prioritize out_folder, then outpath)
                     if not result["output_folder"]:
                         # Check various output folder parameters (in priority order)
                         for key in [
                             "out_folder",
                             "outpath",
-                            "md_workdir",
                             "output_folder",
                         ]:
                             if key in tool_input:
@@ -252,20 +251,10 @@ def parse_trace_file_impl(trace_file: Optional[str] = None) -> Dict[str, Any]:
                         elif "docking" in tool_name.lower():
                             if "docking" not in result["steps_with_errors"]:
                                 result["steps_with_errors"].append("docking")
-                        elif (
-                            "md" in tool_name.lower()
-                            or "lig_prepare" in tool_name
-                            or "gro" in tool_name
-                            or "stability" in tool_name
-                        ):
-                            if "md_analysis" not in result["steps_with_errors"]:
-                                result["steps_with_errors"].append("md_analysis")
-
         # Map agents to pipeline steps
         agent_to_step = {
             "Data Preprocessing Agent": "preprocessing",
             "Molecular Docking Agent": "docking",
-            "Stability MD Agent": "md_analysis",
         }
 
         for agent_name, step in agent_to_step.items():
@@ -293,14 +282,6 @@ def parse_trace_file_impl(trace_file: Optional[str] = None) -> Dict[str, Any]:
                 result["entry_point"] = "search_docking"
             elif "production docking" in prompt_lower and "search" not in prompt_lower:
                 result["entry_point"] = "production_docking"
-            elif "protein topology" in prompt_lower:
-                result["entry_point"] = "md_protein_topology"
-            elif "ligand preparation" in prompt_lower or "ligprep" in prompt_lower:
-                result["entry_point"] = "md_lig_prepare"
-            elif "md simulation" in prompt_lower or "gro" in prompt_lower:
-                result["entry_point"] = "md_gro"
-            elif "stability analysis" in prompt_lower:
-                result["entry_point"] = "md_stability_analysis"
             else:
                 result["entry_point"] = "full_pipeline"
 
@@ -311,5 +292,108 @@ def parse_trace_file_impl(trace_file: Optional[str] = None) -> Dict[str, Any]:
 
     except Exception as e:
         result["error"] = f"Failed to parse trace file: {e}"
+
+    return result
+
+
+def _is_oversight_approved(event: Dict[str, Any]) -> bool:
+    """Return True if this tool_call_end event indicates an approved oversight review.
+    Prefers dict output with an explicit 'approved' boolean; falls back to string heuristics.
+    """
+    out = event.get("output")
+    if out is None:
+        return False
+    if isinstance(out, dict):
+        return out.get("approved") is True
+    if isinstance(out, str):
+        return "NOT approved" not in out and "Approved" in out
+    return False
+
+
+def _is_submit_review_approved(event: Dict[str, Any]) -> bool:
+    """Return True if this tool_call_end is submit_review (Oversight Agent) with approved=True."""
+    if event.get("tool") != "submit_review" or event.get("caller") != "Oversight Agent":
+        return False
+    out = event.get("output")
+    return isinstance(out, dict) and out.get("approved") is True
+
+
+def _extract_approved_plan_input(event: Dict[str, Any]) -> str:
+    """Extract the submission text (plan) from an oversight_agent tool_call input (start or end)."""
+    inp = event.get("input")
+    if inp is None:
+        return ""
+    if isinstance(inp, dict) and "input" in inp:
+        return inp["input"] if isinstance(inp["input"], str) else str(inp["input"])
+    if isinstance(inp, str):
+        return inp
+    return str(inp)
+
+
+def get_trace_plan_pairs(trace_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Extract user-request → approved-plan pairs from a trace file (single pass).
+
+    Uses two signals for approval (so plans are stored reliably):
+    1. submit_review tool_call_end (caller Oversight Agent) with output["approved"] is True
+       — canonical source; plan is taken from the preceding oversight_agent call.
+    2. oversight_agent tool_call_end with output indicating approval (dict with "approved"
+       or string containing "Approved" and not "NOT approved") — fallback for older traces.
+
+    Buffers user_input; on approval, emits (user_request_block, approved_plan) and clears.
+    Supports multi-turn user requests per plan.
+
+    Args:
+        trace_path: Path to the trace JSONL file. If None, returns empty plan_pairs.
+
+    Returns:
+        dict with:
+        - plan_pairs: list of {"user_request_block": str, "approved_plan": str}
+        - error: str or None
+    """
+    result: Dict[str, Any] = {"plan_pairs": [], "error": None}
+    if not trace_path:
+        return result
+
+    path = Path(trace_path)
+    if not path.exists():
+        result["error"] = f"Trace file not found: {path}"
+        return result
+
+    buffer: List[str] = []
+    # submit_review end appears before oversight_agent end; emit pair when we see oversight_agent end with plan
+    pending_emit_from_submit_review: bool = False
+    pending_exact_plan: Optional[str] = None  # from submit_review output; used as approved_plan when present
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("event")
+                if event_type == "user_input":
+                    buffer.append(event.get("input", "") or "")
+                elif event_type == "tool_call_end" and event.get("tool") == "submit_review":
+                    if _is_submit_review_approved(event):
+                        pending_emit_from_submit_review = True
+                        out = event.get("output") if isinstance(event.get("output"), dict) else {}
+                        pending_exact_plan = out.get("exact_plan") or None
+                elif event_type == "tool_call_end" and event.get("tool") == "oversight_agent":
+                    approved_plan = pending_exact_plan if pending_exact_plan else _extract_approved_plan_input(event)
+                    if pending_emit_from_submit_review or _is_oversight_approved(event):
+                        user_request_block = "\n\n".join(buffer).strip()
+                        result["plan_pairs"].append({
+                            "user_request_block": user_request_block,
+                            "approved_plan": approved_plan,
+                        })
+                    buffer = []
+                    pending_emit_from_submit_review = False
+                    pending_exact_plan = None
+    except Exception as e:
+        result["error"] = f"Failed to parse trace: {e}"
 
     return result

@@ -94,14 +94,14 @@ The trace file is in JSONL format (one JSON object per line). Key event types:
 
 1. session_start/session_end - Session boundaries with session_id
 2. workflow_start/workflow_end - Workflow execution boundaries
-3. agent_start/agent_end - When agents (preprocessing_agent, docking_agent, md_agent) run
+3. agent_start/agent_end - When agents (preprocessing_agent, docking_agent) run
 4. tool_call_start/tool_call_end - Tool executions with inputs and outputs
 
 WHAT TO LOOK FOR:
 
 1. **Output Folder**: Look in tool_call_end events for:
    - workflow_agent calls: Check the "input" field for paths containing "output" or "out_folder"
-   - Tool calls like run_clean_pdb, run_vina_dock: Check "out_folder" or "md_workdir" in input
+   - Tool calls like run_clean_pdb, run_vina_dock: Check "out_folder" or "outpath" in input
    - Extract the run directory path (e.g., "agent_data/run_YYYYMMDD_HHMMSS")
 
 1b. **Log File**: Look for:
@@ -114,7 +114,6 @@ WHAT TO LOOK FOR:
 2. **Steps Completed**: Look for tool_call_end events for these agents (no "error" field means success):
    - preprocessing_agent → "preprocessing" step
    - docking_agent → "docking" step  
-   - md_agent → "md_analysis" step
 
 3. **Steps with Errors**: tool_call_end events that have an "error" field
 
@@ -133,10 +132,6 @@ WHAT TO LOOK FOR:
    - "clean" + "receptor" → preprocessing
    - "discover" or "search" → search_docking
    - "production docking" (without search) → production_docking
-   - "protein topology" → md_protein_topology
-   - "ligand preparation" → md_lig_prepare
-   - "md simulation" → md_gro
-   - "stability analysis" → md_stability_analysis
    - Otherwise → full_pipeline
 
 OUTPUT FORMAT:

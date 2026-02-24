@@ -81,14 +81,14 @@ install_step_conda_deps() {
     step "Step 2: Installing conda dependencies"
     ensure_env_active || return 1
 
-    info "Installing rdkit, openbabel, openmm, pdbfixer, jupyter, ipykernel, ipywidgets..."
+    info "Installing rdkit, openbabel, openmm, pdbfixer, pdb2pqr, propka, jupyter, ipykernel, ipywidgets..."
     run_cmd "Installing molecular simulation packages" \
-        "$CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer jupyter ipykernel ipywidgets" || {
+        "$CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer pdb2pqr propka jupyter ipykernel ipywidgets" || {
         error "Failed to install conda dependencies"
         echo ""
         echo "Suggestions:"
         echo "  - Check your internet connection"
-        echo "  - Try: $CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer jupyter ipykernel ipywidgets"
+        echo "  - Try: $CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer pdb2pqr propka jupyter ipykernel ipywidgets"
         if confirm_no "Continue anyway?"; then
             warn "Continuing without some dependencies..."
         else
@@ -384,6 +384,100 @@ configure_opencl() {
 }
 
 # ============================================================================
+# Step 4.6: Configure Vina-GPU runtime libraries
+# ============================================================================
+
+configure_vina_gpu_runtime() {
+    step "Configuring Vina-GPU runtime libraries"
+    ensure_env_active || return 1
+
+    local runtime_env="vinagpu_rt"
+    local conda_base
+    conda_base=$($CONDA_CMD info --base 2>/dev/null)
+    if [[ -z "$conda_base" ]]; then
+        conda_base="$HOME/miniconda3"
+    fi
+    local runtime_libdir="$conda_base/envs/${runtime_env}/lib"
+
+    if [[ ! -d "$runtime_libdir" ]]; then
+        info "Creating Vina-GPU runtime env '$runtime_env' with Boost 1.83 runtime libs..."
+        run_cmd "Creating ${runtime_env} environment" \
+            "$CONDA_CMD create -y -n ${runtime_env} -c conda-forge --override-channels libboost=1.83.0 libgcc-ng libstdcxx-ng" || {
+            warn "Could not create ${runtime_env} runtime environment."
+            warn "GPU docking may fail if Boost 1.83 runtime libs are unavailable."
+            return 0
+        }
+    else
+        info "Using existing Vina-GPU runtime environment: $runtime_env"
+    fi
+
+    if [[ ! -d "$runtime_libdir" ]]; then
+        warn "Vina-GPU runtime library directory not found: $runtime_libdir"
+        warn "GPU docking may fail until runtime libraries are installed."
+        return 0
+    fi
+
+    local activate_dir="$CONDA_PREFIX/etc/conda/activate.d"
+    local deactivate_dir="$CONDA_PREFIX/etc/conda/deactivate.d"
+    mkdir -p "$activate_dir" "$deactivate_dir"
+
+    cat > "$activate_dir/vinagpu_rt.sh" <<EOF
+# Keep global linker state untouched; Vina-GPU backend injects LD_LIBRARY_PATH per subprocess.
+export VINA_GPU_LIBDIR="$runtime_libdir"
+unset _ADAMS_OLD_LD_LIBRARY_PATH
+EOF
+
+    cat > "$deactivate_dir/vinagpu_rt.sh" <<'EOF'
+unset VINA_GPU_LIBDIR
+unset _ADAMS_OLD_LD_LIBRARY_PATH
+EOF
+
+    success "Configured Vina-GPU runtime hooks for '$ENV_NAME'."
+    info "Re-activate '$ENV_NAME' to apply VINA_GPU_LIBDIR automatically."
+}
+
+
+# ============================================================================
+# Step 4.7: Install UniDock (Linux GPU backend)
+# ============================================================================
+
+install_step_unidock() {
+    step "Step 4.7: Installing UniDock"
+    ensure_env_active || return 1
+
+    if command -v unidock &> /dev/null; then
+        local unidock_path
+        unidock_path=$(command -v unidock)
+        success "UniDock already installed: $unidock_path"
+        mark_step_done "unidock"
+        return 0
+    fi
+
+    info "Installing UniDock from conda-forge..."
+    run_cmd "Installing UniDock" \
+        "$CONDA_CMD install -y -c conda-forge unidock" || {
+        error "Failed to install UniDock from conda-forge."
+        echo ""
+        echo "UniDock is required for backend='unidock' runs."
+        echo "Try manually:"
+        echo "  $CONDA_CMD install -y -c conda-forge unidock"
+        echo "Or provide an explicit binary at runtime via:"
+        echo "  gpu_executable='/absolute/path/to/unidock'"
+        return 1
+    }
+
+    if ! command -v unidock &> /dev/null; then
+        error "UniDock installation completed but 'unidock' is not in PATH."
+        error "Re-activate your conda environment and retry."
+        return 1
+    fi
+
+    success "UniDock installed successfully"
+    mark_step_done "unidock"
+}
+
+
+# ============================================================================
 # Step 5: Install ADAMS package
 # ============================================================================
 
@@ -434,6 +528,14 @@ verify_installation() {
         all_ok=false
     fi
 
+    # dimorphite_dl (ligand protonation state enumeration)
+    if python -c "import dimorphite_dl" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} dimorphite_dl"
+    else
+        echo -e "  ${RED}✗${NC} dimorphite_dl"
+        all_ok=false
+    fi
+
     # openbabel
     if command -v obabel &> /dev/null; then
         echo -e "  ${GREEN}✓${NC} openbabel (obabel)"
@@ -458,6 +560,22 @@ verify_installation() {
         all_ok=false
     fi
 
+    # pdb2pqr (required for protonation)
+    if command -v pdb2pqr &> /dev/null; then
+        echo -e "  ${GREEN}✓${NC} pdb2pqr"
+    else
+        echo -e "  ${RED}✗${NC} pdb2pqr"
+        all_ok=false
+    fi
+
+    # propka3 (required for protonation)
+    if command -v propka3 &> /dev/null; then
+        echo -e "  ${GREEN}✓${NC} propka3"
+    else
+        echo -e "  ${RED}✗${NC} propka3"
+        all_ok=false
+    fi
+
     # antechamber (AmberTools)
     if command -v antechamber &> /dev/null; then
         echo -e "  ${GREEN}✓${NC} antechamber (AmberTools)"
@@ -470,6 +588,22 @@ verify_installation() {
         echo -e "  ${GREEN}✓${NC} gmx (GROMACS)"
     else
         echo -e "  ${YELLOW}!${NC} gmx (GROMACS) - not in PATH"
+    fi
+
+    # unidock (required for Linux GPU backend)
+    if [[ "$INSTALL_GPU" == true ]]; then
+        if command -v unidock &> /dev/null; then
+            echo -e "  ${GREEN}✓${NC} unidock"
+        else
+            echo -e "  ${RED}✗${NC} unidock (required for backend=unidock)"
+            all_ok=false
+        fi
+    else
+        if command -v unidock &> /dev/null; then
+            echo -e "  ${GREEN}✓${NC} unidock"
+        else
+            echo -e "  ${YELLOW}!${NC} unidock - not installed (required only for backend=unidock)"
+        fi
     fi
 
     # adams package
@@ -531,9 +665,15 @@ run_linux_install() {
             configure_opencl || exit 1
             mark_step_done "opencl"
         }
+        is_step_done "vina_gpu_runtime" || {
+            configure_vina_gpu_runtime || exit 1
+            mark_step_done "vina_gpu_runtime"
+        }
+        is_step_done "unidock" || install_step_unidock || exit 1
     fi
 
     is_step_done "package" || install_step_package || exit 1
+    is_step_done "extra_forcefields" || install_step_extra_forcefields
 
     # Verification
     verify_installation
@@ -547,7 +687,7 @@ run_linux_install() {
     # Test ADAMS command (warm up imports)
     step "Testing ADAMS installation"
     info "Running ADAMS for the first time (this may take a moment)..."
-    conda run -n "$ENV_NAME" --no-capture-output python -c "import adams.cli" >> "$LOG_FILE" 2>&1 || true
+    conda run -n "$ENV_NAME" --no-capture-output python -c "import adams_tui.app" >> "$LOG_FILE" 2>&1 || true
     success "ADAMS is ready to use!"
 
     # Success message

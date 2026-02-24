@@ -272,6 +272,141 @@ run_cmd_interactive() {
 }
 
 # ============================================================================
+# GROMACS extra force fields (Amber14SB, a99SB-disp)
+# ============================================================================
+# Helpers expect CONDA_PREFIX and GROMACS_VERSION (e.g. 2024.4) from the active
+# conda env. Used by install_step_extra_forcefields (Step 5.5 on Linux and macOS).
+
+AMBER14SB_FF_URL="https://ftp.gromacs.org/contrib/forcefields/amber14sb.ff.tar.gz"
+ROBUSTELLI_FF_REPO="https://github.com/paulrobustelli/Force-Fields.git"
+ROBUSTELLI_FF_SUBDIR="Gromacs_FFs/a99SBdisp.ff"
+
+# Echo the GROMACS share/top directory (where .ff dirs live). Uses CONDA_PREFIX and GROMACS_VERSION.
+get_gromacs_top_dir() {
+    local conda="${CONDA_PREFIX:-}"
+    local gv="${GROMACS_VERSION:-2024.4}"
+    local bin_dir top_dir
+
+    for sub in "gromacs-${gv}/cuda/bin" "gromacs-${gv}/bin" "gromacs/bin"; do
+        bin_dir="$conda/$sub"
+        if [[ -d "$bin_dir" ]]; then
+            # prefix = parent of bin_dir (e.g. .../cuda or .../gromacs-2024.4)
+            local prefix
+            prefix="$(dirname "$bin_dir")"
+            for top in "$prefix/share/gromacs/top" "$prefix/share/top"; do
+                if [[ -d "$top" ]]; then
+                    echo "$top"
+                    return 0
+                fi
+            done
+            # Return expected path even if missing (install step may create it)
+            echo "$prefix/share/gromacs/top"
+            return 0
+        fi
+    done
+    echo ""
+    return 1
+}
+
+# Install amber14sb.ff into top_dir. Idempotent.
+install_amber14sb_ff() {
+    local top_dir="$1"
+    local ff_dir="$top_dir/amber14sb.ff"
+    local tmp_tar
+
+    if [[ -d "$ff_dir" ]]; then
+        info "amber14sb.ff already present, skipping."
+        return 0
+    fi
+    info "Downloading amber14sb.ff from ftp.gromacs.org..."
+    tmp_tar=$(mktemp -t amber14sb.ff.tar.gz.XXXXXX) || return 1
+    if ! curl -sL "$AMBER14SB_FF_URL" -o "$tmp_tar"; then
+        rm -f "$tmp_tar"
+        return 1
+    fi
+    if ! (tar -xzf "$tmp_tar" -C "$top_dir" 2>/dev/null || tar -xf "$tmp_tar" -C "$top_dir"); then
+        rm -f "$tmp_tar"
+        return 1
+    fi
+    rm -f "$tmp_tar"
+    if [[ ! -d "$ff_dir" ]]; then
+        warn "Expected amber14sb.ff after extract; not found."
+        return 1
+    fi
+    info "Installed amber14sb.ff -> $top_dir"
+    return 0
+}
+
+# Install a99SBdisp.ff into top_dir (clone Robustelli repo, copy subdir). Idempotent.
+install_a99sb_disp_ff() {
+    local top_dir="$1"
+    local ff_dir="$top_dir/a99SBdisp.ff"
+    local tmp_dir repo_dir src_dir
+
+    if [[ -d "$ff_dir" ]]; then
+        info "a99SBdisp.ff already present, skipping."
+        return 0
+    fi
+    info "Cloning paulrobustelli/Force-Fields (shallow)..."
+    tmp_dir=$(mktemp -d -t adams_forcefields.XXXXXX) || return 1
+    if ! git clone --depth 1 "$ROBUSTELLI_FF_REPO" "$tmp_dir/Force-Fields"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    repo_dir="$tmp_dir/Force-Fields"
+    src_dir="$repo_dir/$ROBUSTELLI_FF_SUBDIR"
+    if [[ ! -d "$src_dir" ]]; then
+        warn "Expected $ROBUSTELLI_FF_SUBDIR in repo; not found."
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    cp -R "$src_dir" "$ff_dir"
+    rm -rf "$tmp_dir"
+    info "Installed a99SBdisp.ff -> $top_dir"
+    return 0
+}
+
+# Install both extra force fields into GROMACS top. Uses CONDA_PREFIX and GROMACS_VERSION.
+install_extra_forcefields_shell() {
+    local top_dir
+    top_dir=$(get_gromacs_top_dir)
+    if [[ -z "$top_dir" ]] || [[ ! -d "$(dirname "$top_dir")" ]]; then
+        warn "GROMACS top directory not found (CONDA_PREFIX=$CONDA_PREFIX). Skipping extra force fields."
+        return 1
+    fi
+    info "GROMACS top directory: $top_dir"
+    mkdir -p "$top_dir"
+    local ok=0
+    if install_amber14sb_ff "$top_dir"; then
+        : $((ok += 1))
+    else
+        warn "Amber14SB installation failed."
+    fi
+    if install_a99sb_disp_ff "$top_dir"; then
+        : $((ok += 1))
+    else
+        warn "a99SB-disp installation failed."
+    fi
+    [[ $ok -ge 1 ]]
+}
+
+# Step 5.5: Install Amber14SB and a99SB-disp into GROMACS share/top.
+# Called by install_linux.sh and install_macos.sh. Requires ENV_NAME (e.g. adams).
+install_step_extra_forcefields() {
+    step "Step 5.5: Installing extra GROMACS force fields (Amber14SB, a99SB-disp)"
+    ensure_env_active || return 1
+
+    info "Downloading Amber14SB and a99SB-disp into GROMACS share/top..."
+    if install_extra_forcefields_shell; then
+        success "Extra force fields installed (presets amber14sb_tip3p, a99sb_disp available)"
+    else
+        warn "Extra force fields could not be installed (e.g. network or git unavailable)."
+        warn "Preset ff99sb_ildn_tip3p is available by default. See FORCEFIELD_PRESETS.md."
+    fi
+    mark_step_done "extra_forcefields"
+}
+
+# ============================================================================
 # Shell integration
 # ============================================================================
 
@@ -341,7 +476,7 @@ setup_shell_function() {
 
 # ADAMS shell function - auto-activates conda environment
 adams() {
-    conda run -n $env_name --no-capture-output python -m adams.cli "\$@"
+    conda run -n $env_name --no-capture-output python -m adams_tui.app "\$@"
 }
 EOF
 

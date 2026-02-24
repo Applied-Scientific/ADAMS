@@ -44,7 +44,7 @@ Traditional computational workflows often suffer from "human-in-the-loop" bottle
 
 ### Installation
 
-**Prerequisites:** Conda or Mamba and an OpenAI API key.
+**Prerequisites:** Conda or Mamba and your favorite LLM provider's API key.
 
 **Option 1:**
 

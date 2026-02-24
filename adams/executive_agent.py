@@ -42,20 +42,25 @@ def get_gpu_spec_from_user() -> dict:
     """
     Resolve GPU usage preference when the user did not specify CPU/GPU.
 
-    Call this tool only when hardware preference is still undecided.
+    Call this tool when hardware preference is undecided (e.g. start of a run).
     Do not call it if the user already explicitly requested GPU or CPU.
 
     Behavior:
     - Detect available CUDA GPUs via `nvidia-smi`
-    - If at least one GPU is available and interactive prompts are supported, prompt the user for GPU usage
-    - In non-interactive contexts (e.g., TUI/background thread), skip prompting and return `use_gpu=False`
-    - If no GPU is available, do not prompt and return `use_gpu=False`
+    - If GPUs exist and stdin is interactive (TTY): prompt the user on stdin (y/n)
+    - If GPUs exist but context is non-interactive (e.g. TUI): return ask_user_in_chat=True;
+      you MUST then ask the user in chat: "I detected N GPU(s): {gpu_names}. Do you want to
+      use them for docking?" and use their reply to set use_gpu before calling workflow_agent
+    - If no GPU is available: return use_gpu=False (no prompt needed)
 
     Returns:
         dict: Hardware decision payload with:
-            - `use_gpu` (bool): User choice when GPU exists, else False
+            - `use_gpu` (bool): True/False from user or from context; when ask_user_in_chat
+              is True, this is False until you ask in chat and set it from the user's answer
             - `num_gpus` (int): Number of detected GPUs (0 if unavailable)
             - `gpu_names` (str): Comma-separated GPU names, empty if unavailable
+            - `ask_user_in_chat` (bool, optional): When True, you MUST ask the user in chat
+              whether to use GPUs and must not proceed until they answer
             - `decision_source` (str): Why this decision was made
     """
     return get_gpu_usage_decision()

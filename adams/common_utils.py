@@ -220,9 +220,15 @@ def get_gpu_usage_decision() -> dict:
 
     Returns:
         dict: Decision payload containing:
-            - use_gpu (bool)
+            - use_gpu (bool): When ask_user_in_chat is True, this is False until
+              the user replies; the agent must ask in chat and then set use_gpu from
+              the user's answer.
             - num_gpus (int)
             - gpu_names (str)
+            - ask_user_in_chat (bool, optional): When True, the agent MUST ask the
+              user in chat whether to use GPUs and must not proceed with workflow
+              until the user answers. Set only when GPUs exist but stdin prompt
+              is unavailable (e.g. TUI or non-interactive).
             - decision_source (str): one of
               "no_gpu_available", "non_interactive_default", "interactive_user_yes",
               "interactive_user_no", "interactive_eof_default"
@@ -250,12 +256,13 @@ def get_gpu_usage_decision() -> dict:
     if force_non_interactive or not is_interactive_tty or not in_main_thread:
         print(
             "GPU(s) detected, but interactive prompts are unavailable in this mode. "
-            "Defaulting to CPU unless GPU is explicitly requested."
+            "The agent will ask you in chat whether to use them for docking."
         )
         return {
             "use_gpu": False,
             "num_gpus": gpu_count,
             "gpu_names": gpu_names,
+            "ask_user_in_chat": True,
             "decision_source": "non_interactive_default",
         }
 

@@ -89,7 +89,10 @@ Follow this precise workflow for all pipeline execution requests:
 - Gather context using tools and memory first (Principle 5). Only ask the user if that does not suffice.
 
 ### Step 3: Determine Hardware Usage
-- **GPU Usage**: If user explicitly requests GPU/CPU -> Use their request. Otherwise, check persistent memory for `preferred_gpu_usage`. If no preference and GPUs are available -> Call `get_gpu_spec_from_user()`. In non-interactive contexts (e.g., TUI/background runs), do not block waiting for stdin prompts; if preference is still ambiguous, ask the user in chat rather than forcing stdin prompts.
+- **GPU Usage**: If user explicitly requests GPU/CPU -> Use their request. Otherwise, check persistent memory for `preferred_gpu_usage`. If no preference and GPUs are available -> Call `get_gpu_spec_from_user()`.
+  - **When the tool returns `ask_user_in_chat: true`** (e.g. TUI or non-interactive): You MUST ask the user in chat: "I detected {num_gpus} GPU(s): {gpu_names}. Do you want to use them for docking?" Do NOT proceed to planning or workflow_agent until the user answers. Set `use_gpu` from their answer (yes -> True, no -> False) and optionally store in persistent memory for next time.
+  - When the tool prompts on stdin (interactive TTY), the user answers there and the tool returns `use_gpu` directly; no chat question needed.
+  - If no GPUs are available, the tool returns `use_gpu=False`; proceed without asking.
 - **GPU Allocation (CRITICAL)**: If `use_gpu=True`, call `resolve_gpu_config` before planning/execution.
   - If user did NOT request a specific GPU count/IDs, use resolver defaults (`auto_all`) and pass returned `num_gpus`/`gpu_ids` to workflow calls.
   - When persistent memory indicates a prior preference (e.g., "use all GPUs"), follow it and pass `requested_num_gpus=None`, `requested_gpu_ids=None` so resolver returns `auto_all`.

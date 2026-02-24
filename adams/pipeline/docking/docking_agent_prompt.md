@@ -109,20 +109,26 @@ The docking pipeline follows a strict sequence:
 2.  **find_pocket** → Clusters results and extracts top N binding pockets
 3.  **prod_dock** (run_docking with mode="production") → Production docking at identified sites
 
+**SEQUENTIAL EXECUTION (DO NOT PARALLELIZE):**
+- Execute these steps **one after the other**. Do NOT call run_find_pocket or run_docking(mode="production") in the same turn as run_docking(mode="search").
+- **Wait** for run_docking(mode="search") to **complete and return** its output path before calling run_find_pocket. run_find_pocket requires the search output CSV; that file does not exist until search has finished.
+- **Wait** for run_find_pocket to **complete and return** the docking_centers path before calling run_docking(mode="production"). Production mode requires docking_centers_file (or complex/docking_centers); that file is produced by find_pocket.
+- Calling production or find_pocket before their inputs exist will fail (e.g. "Production docking requires explicit docking centers" or "input_file cannot be empty").
+
 **WORKFLOW PATTERNS:**
 
 **Pattern A: Complete Pipeline (Discovery + Production)**
 When user requests: 'complete/entire pipeline', 'all steps', 'discover THEN dock'
 
-Three-step sequential workflow:
-1.  **Search Docking**: Call run_docking with mode="search"
+Three-step sequential workflow (complete each step and use its return value before starting the next):
+1.  **Search Docking**: Call run_docking with mode="search". **Wait for it to return** the path to best_search_docking_centers.csv.
     -   Choose backend from the docking-engine principles (resource constraints, throughput, explicit preference)
     -   Use same out_folder for all steps
     -   Output: '{out_folder}/docking/search/summaries/best_search_docking_centers.csv'
-2.  **Find Pocket**: Call run_find_pocket with the search docking output CSV
+2.  **Find Pocket**: Call run_find_pocket with **the path returned from Step 1** as input_file. **Wait for it to return** the docking_centers path.
     -   Use same out_path as out_folder from Step 1
     -   Output: '{out_folder}/docking/search/summaries/docking_centers.csv'
-3.  **Production Docking**: Call run_docking with mode="production"
+3.  **Production Docking**: Call run_docking with mode="production", docking_centers_file=**path from Step 2**.
     -   Use the same backend-selection principles; keep backend consistent with Step 1 unless the user differentiates
     -   Use docking_centers_file from Step 2
     -   num_pockets: SAME as top_n_clusters from Step 2

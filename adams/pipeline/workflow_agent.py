@@ -8,33 +8,7 @@ from ..logger_utils import setup_logger
 from ..path_config import get_subdirectory
 from .data_preprocessing.preprocessing_agent import preprocessing_agent
 from .docking.docking_agent import docking_agent
-from .md_analysis.md_agent import md_agent
-
-
-def _load_reference_files(*filenames: str) -> str:
-    """
-    Load reference markdown files and format them for embedding in system prompts.
-
-    Args:
-        *filenames: Names of reference files to load (e.g., "entry_points.md")
-
-    Returns:
-        Formatted string containing all reference file contents
-    """
-    references_dir = Path(__file__).parent / "references"
-    sections = []
-
-    for filename in filenames:
-        file_path = references_dir / filename
-        if file_path.exists():
-            content = file_path.read_text(encoding="utf-8")
-            # Extract title from filename (e.g., "entry_points.md" -> "Entry Points")
-            title = filename.replace(".md", "").replace("_", " ").title()
-            sections.append(f"\n## {title}\n\n{content}")
-
-    if sections:
-        return "\n# Reference Documentation\n" + "\n".join(sections)
-    return ""
+from .references.reference_file_reader import read_reference_file
 
 
 @function_tool
@@ -64,11 +38,12 @@ def create_run_directory() -> str:
         >>> run_dir = create_run_directory()
         >>> # Returns: "agent_data/outputs/run_20251203_143022"
         >>> # Directory is created and ready for use
-        >>> # IMPORTANT: Use this exact path for all subsequent operations (outpath, out_folder, md_workdir)
+        >>> # IMPORTANT: Use this exact path for all subsequent operations (outpath, out_folder)
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = get_subdirectory("outputs", f"run_{timestamp}")
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[Agent] Created run directory: {run_dir}")
     return str(run_dir)
 
 
@@ -85,6 +60,8 @@ def setup_pipeline_logger(log_file: str) -> str:
     - Starting a new run - construct the log file name to match the run directory name
     - The user explicitly requests a custom log file location or name
     - Resuming a previous run - pass the existing log_file path to continue logging to the same file
+
+    IMPORTANT for multiple runs (e.g. comparison): Call this immediately before the pipeline step for that run, then run that step. Do NOT call it for all runs first and then run steps—the logger is global, so only the last log_file receives output. Alternatively, pass log_file to run_docking for each run so the tool sets the logger at run time.
 
     Args:
         log_file (str): Full path to the log file. If the file exists, logging will append to it.
@@ -119,16 +96,8 @@ def setup_pipeline_logger(log_file: str) -> str:
 prompt_path = Path(__file__).parent / "workflow_prompt.md"
 base_prompt = prompt_path.read_text()
 
-# Load and embed reference documentation
-reference_docs = _load_reference_files(
-    "entry_points.md",
-    "workflow_examples.md",
-    "parameter_defaults.md",
-    "directory_structure.md",
-    "file_path_mapping.md",
-)
-
-system_prompt = base_prompt + reference_docs
+# Reference documentation is now lazy-loaded via read_reference_file tool
+system_prompt = base_prompt + "\n\nNote: Reference documentation is available via the read_reference_file tool. Use it to look up entry points, parameter defaults, and examples."
 
 workflow_agent = Agent(
     model="gpt-5.2-pro",
@@ -137,13 +106,13 @@ workflow_agent = Agent(
     tools=[
         create_run_directory,
         setup_pipeline_logger,
+        read_reference_file,
         file_parser_agent.as_tool(
             tool_name="file_parser_agent",
             tool_description=(
                 "An agent that extracts structured statistics from pipeline output files to enable parameter extraction and result-based decision making. "
-                "Use this agent to extract parameters from previous step results (e.g., optimal `tops` parameter for MD based on docking pose counts). "
-                "Can parse docking results CSV to extract affinity statistics, pose counts, and pocket analysis. "
-                "Can parse MD results directories to check completion status and extract pose statistics."
+                "Use this agent to extract parameters from previous step results. "
+                "Can parse docking results CSV to extract affinity statistics, pose counts, and pocket analysis."
             ),
         ),
         preprocessing_agent.as_tool(
@@ -162,20 +131,6 @@ workflow_agent = Agent(
                 "Required: cleaned receptor, SMILES CSV. "
                 "Entry Point 3 (Production Only): Dock at known binding sites. "
                 "Required: cleaned receptor, SMILES CSV, docking_centers or docking_centers_file."
-            ),
-        ),
-        md_agent.as_tool(
-            tool_name="md_agent",
-            tool_description=(
-                "Entry Points 4-7: Run MD stability analysis pipeline. "
-                "Entry Point 4 (ProteinTopology): Start from protein topology generation. "
-                "Required: protein_file (cleaned PDB), docking_csv, ligand_input. "
-                "Entry Point 5 (LigPrepare): Start from ligand preparation. "
-                "Required: protein_gro, protein_top, docking_csv, ligand_input. "
-                "Entry Point 6 (Gro): Start from MD simulations. "
-                "Required: poses_dir (with min.gro, system.top, index.ndx). "
-                "Entry Point 7 (Analysis): Run only stability analysis. "
-                "Required: poses_dir (with md.tpr, md.xtc, md.gro, index files)."
             ),
         ),
     ],

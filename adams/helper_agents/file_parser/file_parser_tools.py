@@ -3,6 +3,7 @@
     These functions are used by the File Parser Agent.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict
 

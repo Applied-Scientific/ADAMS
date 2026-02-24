@@ -20,6 +20,7 @@ gromacs-2024.4*
 agent_data/
 tests/*deprecated*
 docs/plans
+build/
 
 # Specific Files
 .log

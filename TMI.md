@@ -17,7 +17,6 @@ This document provides detailed implementation details, installation instruction
    - [Agent Hierarchy](#agent-hierarchy)
    - [Stage 1: Preprocessing](#stage-1-preprocessing)
    - [Stage 2: Docking](#stage-2-docking)
-   - [Stage 3: MD Analysis](#stage-3-md-analysis)
 5. [Troubleshooting](#troubleshooting)
 6. [Additional Documentation](#additional-documentation)
 
@@ -78,7 +77,7 @@ The agent will prompt you for details or use configuration defaults.
 
 ### Pipeline Stages
 
-The pipeline consists of three main stages: preprocessing, docking, and MD analysis. Each stage has distinct operational modes or steps.
+The pipeline consists of two main stages: preprocessing and docking. Each stage has distinct operational modes or steps. *MD / stability analysis: coming soon in a future release.*
 
 **Note:** For detailed information on how agents coordinate within each stage, see the [Pipeline Architecture](#pipeline-architecture) section below.
 
@@ -86,7 +85,7 @@ The pipeline consists of three main stages: preprocessing, docking, and MD analy
 
 The preprocessing stage consists of two independent operations that can be run in any order:
 
-1. **Receptor Preparation** (`run_clean_pdb`): Cleans protein PDB structures by selecting chains, removing water molecules and unwanted heterogens, adding missing atoms and hydrogens, and optionally extracting bound ligands.
+1. **Receptor Preparation** (`run_clean_pdb` + `run_protonate_receptor`): Cleans protein PDB structures by selecting chains, keeping or removing heterogens and waters (default: keep_heterogens="essential"; use keep_heterogens=None to remove all), adding missing atoms (no hydrogens), then protonates using PDB2PQR+PROPKA for pKa-based protonation states, and optionally extracting bound ligands.
 
 2. **Ligand Preprocessing** (`run_ligand_preprocessing`): Processes ligand CSV files by filtering compounds by molecular weight, validating SMILES structures (optional), and optionally performing stratified sampling to create representative subsets of large libraries.
 
@@ -111,17 +110,6 @@ The docking stage supports two operational modes:
 2. Cluster results to identify top pockets (via `run_find_pocket`)
 3. Run production docking at the identified sites
 
-#### Stage 3: MD Analysis
-
-The MD analysis stage consists of four sequential steps:
-
-1. **Protein Topology** (`run_protein_topology`): Generates protein topology files (protein.gro, topol.top) from cleaned PDB structures
-2. **Ligand Preparation** (`run_lig_prepare`): Prepares ligand poses from docking results and combines with protein topology
-3. **MD Simulations** (`run_gro`): Runs energy minimization, NVT/NPT equilibration, and production MD trajectories
-4. **Stability Analysis** (`run_stability_analysis`): Analyzes trajectories for RMSD, RMSF, and binding stability metrics
-
-For batch processing examples, see `run_inference.scr` in the project root.
-
 ---
 
 ## Output File Organization
@@ -135,8 +123,9 @@ For detailed execution order, file path specifications, and entry point document
 ```
 output_folder/
 ├── preprocessing/
-│   ├── receptors/          # Cleaned protein PDB files
-│   │   └── {protein_name}_{chain}_clean_h.pdb
+│   ├── receptors/          # Cleaned and protonated protein PDB files
+│   │   ├── {protein_name}_{chain}_clean.pdb        # Cleaned (no hydrogens)
+│   │   └── {protein_name}_{chain}_protonated.pdb    # Protonated (with pKa-based hydrogens)
 │   ├── ligands/            # Processed ligand files
 │   │   ├── metal_compounds.csv
 │   │   ├── metal_organic_compounds.csv
@@ -167,26 +156,13 @@ output_folder/
 │       │   └── production_docking_results.csv
 │       └── metadata/       # Docking metadata
 │           └── dock_metadata.pkl
-│
-└── md_analysis/            # Molecular Dynamics analysis outputs
-    ├── protein/            # Protein topology files
-    │   ├── protein.gro
-    │   └── topol.top
-    ├── poses/              # Prepared ligand poses for MD
-    │   └── {ligand_name}_pocket_{grid_id}_top{rank}/
-    │       ├── {ligand_name}.gro
-    │       ├── {ligand_name}.top
-    │       └── ... (GROMACS simulation files)
-    └── reports/            # MD analysis reports
-        ├── md_analysis_summary_{range}.csv
-        └── brief_report_{range}.csv
 ```
 
 ### File Descriptions
 
 #### Understanding Docking Output Files
 
-The docking pipeline creates several CSV files with different purposes. Understanding these file names is important for correctly linking docking results to MD analysis.
+The docking pipeline creates several CSV files with different purposes. Understanding these file names is important for downstream use of docking results.
 
 ##### Search Docking Files (`docking/search/summaries/`)
 
@@ -202,15 +178,13 @@ The docking pipeline creates several CSV files with different purposes. Understa
 
 ##### Production Docking Files (`docking/production/summaries/`)
 
-- **`production_docking_results.csv`**: Contains the best pose per pocket from **production docking only**. This file includes **only the top N pockets** (e.g., 3) that were selected for production docking. **This is the preferred file for MD analysis** as it matches the actual PDBQT files created during production docking.
+- **`production_docking_results.csv`**: Contains the best pose per pocket from **production docking only**. This file includes **only the top N pockets** (e.g., 3) that were selected for production docking. This file matches the actual PDBQT files created during production docking.
 
 **Note**: `best_docking_centers.csv` is a **search mode** output file (located in `docking/search/summaries/`), not a production mode file. It contains the best pose per grid from search docking and is used as input for clustering analysis.
 
 ##### Important Notes for File Matching
 
-- **For MD analysis**: The **workflow agent** extracts the path to `production_docking_results.csv` from the docking agent's output and passes it to the MD agent. The MD agent uses whatever CSV file is provided via the `docking_csv` parameter - it does not perform automatic file prioritization or discovery.
-
-- **File matching**: The number of PDBQT files in `docking/production/poses/` should match the number of pockets in `production_docking_results.csv`. If you see a mismatch (e.g., 8 poses but only 3 PDBQT files), check that MD is using the correct CSV file.
+- **File matching**: The number of PDBQT files in `docking/production/poses/` should match the number of pockets in `production_docking_results.csv`.
 
 - **Naming convention**: 
   - Search docking uses `grid_{grid_id}` in filenames (e.g., `ligand_0_grid_5_docked.pdbqt`)
@@ -241,7 +215,7 @@ The system uses a hierarchical agent architecture where specialized agents coord
 **Level 2: Stage Agents**
 - **Preprocessing Agent**: Manages data preparation and format conversion
 - **Docking Agent**: Handles molecular docking workflows and pose selection
-- **MD Analysis Agent**: Coordinates molecular dynamics simulations and stability analysis
+- *MD / stability analysis agent: coming soon in a future release.*
 
 **Level 3: Helper Agents**
 - File validation and error handling
@@ -250,7 +224,6 @@ The system uses a hierarchical agent architecture where specialized agents coord
 
 **Level 4: Worker Modules**
 - AutoDock Vina (docking calculations)
-- GROMACS (molecular dynamics simulations)
 - File converters and format validators
 
 
@@ -261,7 +234,7 @@ Agents make autonomous decisions while worker modules handle the heavy computati
 **Purpose**: Prepare protein and ligand inputs for docking
 
 **What happens:**
-1. Protein cleaning: Remove waters, add hydrogens, assign charges
+1. Protein cleaning: Remove waters, add missing atoms (no hydrogens), then protonate using PDB2PQR+PROPKA (pKa-based protonation)
 2. Ligand filtering: Separate by molecular weight, identify metal-containing compounds
 3. Format conversion: Convert to formats required by AutoDock Vina (PDBQT)
 
@@ -286,7 +259,7 @@ Agents make autonomous decisions while worker modules handle the heavy computati
 - Takes top N pockets (typically 3) from search
 - Performs focused docking with increased exhaustiveness
 - Generates ranked poses for each pocket
-- Selects top poses for MD simulation
+- Selects top poses for downstream analysis
 
 **Agent coordination:**
 
@@ -299,38 +272,12 @@ Agents make autonomous decisions while worker modules handle the heavy computati
 *Production Phase:*
 - Stage agent adjusts docking exhaustiveness based on pocket characteristics
 - Helper agent evaluates pose quality and diversity
-- Stage agent applies selection criteria to identify MD candidates
-- Coordinator agent decides which poses warrant expensive MD simulations
+- Stage agent applies selection criteria to identify top candidates
+- Coordinator agent decides which poses to retain
 
 **Worker modules:** AutoDock Vina, clustering algorithms, PDBQT converters, scoring functions
 
-### Stage 3: MD Analysis
-
-**Preparation:**
-- Converts PDBQT poses to GROMACS-compatible formats
-- Generates topology files for protein-ligand complexes
-- Sets up simulation box and solvation
-
-**Simulation:**
-1. Energy minimization (steepest descent)
-2. NVT equilibration (temperature stabilization)
-3. NPT equilibration (pressure stabilization)
-4. Production MD run (typically 10-100 ns)
-
-**Analysis:**
-- RMSD (stability of binding)
-- RMSF (residue flexibility)
-- Hydrogen bond persistence
-- Binding energy estimates
-
-**Agent coordination:**
-- Stage agent configures simulation parameters (length, force field, etc.)
-- Helper agent monitors simulation stability and convergence
-- Stage agent interprets RMSD, RMSF, and binding energy metrics
-- Coordinator agent synthesizes results and generates final report
-- Helper agent handles convergence issues and decides if simulation needs extension
-
-**Worker modules:** GROMACS, AmberTools, analysis scripts, trajectory processors
+*Stage 3 (MD / stability analysis): coming soon in a future release.*
 
 ---
 

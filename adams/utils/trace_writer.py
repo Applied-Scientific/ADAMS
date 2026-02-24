@@ -39,20 +39,22 @@ class JsonTraceProcessor(TracingProcessor):
     Only captures meaningful events:
     - Agent runs (start/end with timing)
     - Tool calls (with inputs and outputs)
+    - LLM Generations (prompts and responses)
     - Errors
 
     Skips internal SDK spans like ResponseSpanData for cleaner output.
     """
 
-    def __init__(self, output_dir: str = "agent_data/traces"):
+    def __init__(self, output_dir: str = "agent_data/traces", session_id: Optional[str] = None):
         """
         Initialize the JSON trace processor.
 
         Args:
             output_dir: Directory to write trace files.
+            session_id: Optional session ID to continue. If None, creates a new session.
         """
         self.output_dir = output_dir
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filepath = os.path.join(output_dir, f"trace_{self.session_id}.jsonl")
         self._ensure_dir()
 
@@ -60,7 +62,18 @@ class JsonTraceProcessor(TracingProcessor):
         self._span_start_times: Dict[str, datetime] = {}
         self._span_agents: Dict[str, str] = {}  # Map span_id to agent name for context
 
-        self._write_session_header()
+        # Only write session header if this is a new session
+        if session_id is None:
+            self._write_session_header()
+            self._register_session()
+        else:
+            # Continuing existing session - write continuation marker
+            continuation_event = {
+                "event": "session_continued",
+                "session_id": self.session_id,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self._write_event(continuation_event)
 
     def _ensure_dir(self) -> None:
         """Create the output directory if it doesn't exist."""
@@ -74,6 +87,16 @@ class JsonTraceProcessor(TracingProcessor):
             "timestamp": datetime.now().isoformat(),
         }
         self._write_event(header)
+
+    def _register_session(self) -> None:
+        """Register session in memory system."""
+        try:
+            from ..memory.session_memory import register_session
+
+            register_session(self.session_id, self.filepath)
+        except Exception:
+            # Fail silently if memory system not available
+            pass
 
     def write_user_input(self, user_input: str) -> None:
         """Write user input to the trace file."""
@@ -127,9 +150,11 @@ class JsonTraceProcessor(TracingProcessor):
         if span_data is None:
             return False
 
-        # Only log agent spans and function spans
-        # Skip ResponseSpanData, GenerationSpanData (too verbose), etc.
-        return isinstance(span_data, (AgentSpanData, FunctionSpanData, HandoffSpanData))
+        # Log agent spans, function spans, and generation (LLM) spans
+        return isinstance(
+            span_data,
+            (AgentSpanData, FunctionSpanData, HandoffSpanData, GenerationSpanData),
+        )
 
     def _get_span_type(self, span: Span) -> Optional[str]:
         """Get a human-readable span type."""
@@ -140,6 +165,8 @@ class JsonTraceProcessor(TracingProcessor):
             return "tool_call"
         elif isinstance(span_data, HandoffSpanData):
             return "handoff"
+        elif isinstance(span_data, GenerationSpanData):
+            return "generation"
         return None
 
     def _get_agent_name(self, span: Span) -> Optional[str]:
@@ -161,10 +188,31 @@ class JsonTraceProcessor(TracingProcessor):
                         result["input"] = json.loads(span.span_data.input)
                     else:
                         result["input"] = span.span_data.input
-                except:
+                except (json.JSONDecodeError, TypeError):
                     result["input"] = span.span_data.input
             if hasattr(span.span_data, "output") and span.span_data.output:
                 result["output"] = span.span_data.output
+        return result
+
+    def _get_generation_info(self, span: Span) -> Dict[str, Any]:
+        """Extract LLM generation information from span data."""
+        result = {}
+        if isinstance(span.span_data, GenerationSpanData):
+            if span.span_data.model:
+                result["model"] = span.span_data.model
+            if span.span_data.usage:
+                result["usage"] = span.span_data.usage
+            
+            # Extract input (messages sent to LLM)
+            if span.span_data.input:
+                # This is usually a list of messages. We might want to simplify or log as is.
+                # For now, let's log it, but maybe truncate if huge?
+                result["input"] = span.span_data.input
+            
+            # Extract output (content from LLM)
+            if span.span_data.output:
+                result["output"] = span.span_data.output
+                
         return result
 
     def _find_parent_agent(self, span: Span) -> Optional[str]:
@@ -232,6 +280,13 @@ class JsonTraceProcessor(TracingProcessor):
                 event["input"] = func_info["input"]
 
             self._write_event(event)
+            
+        elif span_type == "generation":
+            # We explicitly do NOT log start for generation to avoid noise, 
+            # unless we want to see latency start. 
+            # But the 'end' event will have the content.
+            # Let's optionally log start if needed, but for now skip to keep clean.
+            pass
 
     def on_span_end(self, span: Span) -> None:
         """Called when a span completes - only log meaningful spans."""
@@ -299,6 +354,33 @@ class JsonTraceProcessor(TracingProcessor):
             if error_info:
                 event["error"] = error_info
 
+            self._write_event(event)
+            
+        elif span_type == "generation":
+            gen_info = self._get_generation_info(span)
+            parent_agent = self._find_parent_agent(span)
+            
+            event = {
+                "event": "generation",
+                "timestamp": datetime.now().isoformat(),
+                "caller": parent_agent,
+                "duration_sec": duration_sec,
+                "span_id": span.span_id,
+            }
+            
+            # Merge generation info
+            if "model" in gen_info:
+                event["model"] = gen_info["model"]
+            if "input" in gen_info:
+                event["input"] = gen_info["input"]
+            if "output" in gen_info:
+                event["output"] = gen_info["output"]
+            if "usage" in gen_info:
+                event["usage"] = gen_info["usage"]
+                
+            if error_info:
+                event["error"] = error_info
+                
             self._write_event(event)
 
     def shutdown(self) -> None:

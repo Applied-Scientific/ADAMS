@@ -1,0 +1,35 @@
+# GIT files
+.git
+.gitignore
+.pre-commit-config.yaml
+
+# Python/Environment
+.env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+*.egg-info
+.coverage
+htmlcov/
+dist/
+build/
+
+# IDE/System
+.vscode
+.idea
+.DS_Store
+
+# Application Data
+agent_data/
+agent_data_profile/
+*.log
+*.pdb
+*.pdbqt
+*.csv
+# Keep input files if they are part of the repo structure, but exclude data generated during runs
+# The .gitignore lists *.csv, *.pdb, etc. but setup.py includes package data.
+# We should be careful. 
+# Dockerignore should generally exclude temporary/output data.
+# We'll allow source files but exclude bulky outputs if any are in the root source tree.

@@ -1,0 +1,12 @@
+services:
+  adams:
+    build: .
+    image: adams:latest
+    environment:
+      # Pass the OpenAI API Key from the host environment
+      - OPENAI_API_KEY
+    volumes:
+      # Mount the agent_data directory to persist outputs
+      - ./agent_data:/app/agent_data
+    stdin_open: true # KEEP STDIN open even if not attached
+    tty: true        # Allocate a pseudo-TTY

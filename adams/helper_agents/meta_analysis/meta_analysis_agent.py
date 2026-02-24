@@ -51,7 +51,7 @@ def read_trace_file(trace_file: str = None) -> dict:
         Each line in the trace file is a JSON object representing an event:
         - session_start/session_end: Session boundaries with session_id
         - workflow_start/workflow_end: Workflow execution boundaries
-        - agent_start/agent_end: When agents (preprocessing_agent, docking_agent, md_agent) run
+        - agent_start/agent_end: When agents (preprocessing_agent, docking_agent) run
         - tool_call_start/tool_call_end: Tool executions with inputs and outputs
 
     Example:
@@ -134,7 +134,7 @@ def parse_trace_file(trace_file: str = None) -> dict:
             - 'entry_point' (str): Inferred entry point used
             - 'output_folder' (str or None): Output folder path
             - 'log_file' (str or None): Log file path
-            - 'completed_steps' (list): List of completed steps (preprocessing, docking, md_analysis)
+            - 'completed_steps' (list): List of completed steps (preprocessing, docking)
             - 'steps_with_errors' (list): List of steps that had errors
             - 'file_paths' (dict): Dict with:
                 - 'receptor' (str or None): Receptor file path
@@ -181,7 +181,7 @@ def parse_log_file(log_file: str) -> dict:
             - 'log_file' (str): Path to the log file parsed
             - 'steps' (list): List of step dictionaries with:
                 - 'name' (str): Step name (module name)
-                - 'stage' (str): Pipeline stage (preprocessing, docking, md_analysis)
+                - 'stage' (str): Pipeline stage (preprocessing, docking)
                 - 'started' (str): Start timestamp
                 - 'completed' (str): Completion timestamp (or None)
                 - 'duration_sec' (float): Duration in seconds (or None)

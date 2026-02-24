@@ -7,6 +7,7 @@ Description:
 
 import os
 import re
+from typing import Dict, List, Optional
 
 import pandas as pd
 from rdkit import Chem
@@ -14,6 +15,12 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 
 from ...logger_utils import get_logger, log_step_execution
 from ..file_organization import setup_preprocessing_dirs
+from .microstate_enumeration import enumerate_ligand_microstates
+from .smiles_qc import (
+    is_kekulize_rescue_mode,
+    parse_smiles_with_kekulize_rescue,
+    quick_3d_forcefield_qc,
+)
 
 METALS = {
     "Li",
@@ -84,9 +91,10 @@ def check_vina_compatibility(smiles):
         tuple: (is_compatible, reason) where is_compatible is bool and reason is str
     """
     try:
-        mol = Chem.MolFromSmiles(smiles, sanitize=True)
+        parsed = parse_smiles_with_kekulize_rescue(smiles, prefer_restandardize=True)
+        mol = parsed.mol
         if mol is None:
-            return False, "Invalid SMILES"
+            return False, f"Invalid SMILES: {parsed.reason}"
 
         # Check for formal charges that may cause issues
         for atom in mol.GetAtoms():
@@ -113,7 +121,9 @@ def check_vina_compatibility(smiles):
             if symbol in unsupported_elements:
                 return False, f"Unsupported element: {symbol}"
 
-        return True, "Compatible"
+        if parsed.parse_mode == "strict":
+            return True, "Compatible"
+        return True, f"Compatible ({parsed.parse_mode}: {parsed.reason})"
 
     except Exception as e:
         return False, f"Error checking compatibility: {str(e)}"
@@ -132,6 +142,20 @@ class LigandPreprocessor:
         output_prefix: str = "cleaned_data",
         outpath: str = "output",
         quick_start: bool = False,
+        enumerate_microstates: bool = True,
+        enumerate_tautomers: bool = True,
+        enumerate_protonation: bool = True,
+        enumerate_stereoisomers: bool = True,
+        pH_range: tuple = (6.4, 8.4),
+        protonation_precision: float = 0.5,
+        max_generated_tautomers: Optional[int] = 64,
+        top_tautomers_per_protomer: int = 2,
+        tautomer_energy_window_kcal: float = 3.0,
+        max_protomers: int = 16,
+        max_stereoisomers: int = 16,
+        max_unassigned_stereocenters: int = 2,
+        max_total_microstates: int = 64,
+        enumerate_all_stereocenters: bool = False,
     ):
         """
         Initialize the LigandPreprocessor.
@@ -146,6 +170,22 @@ class LigandPreprocessor:
             output_prefix: str: Prefix for output files (default: "cleaned_data")
             outpath: str: Output directory (default: ./output)
             quick_start: bool: If True, use fast processing path (skips metal context analysis) (default: False)
+            enumerate_microstates: bool: Enable microstate enumeration (default: True). When True, tautomers, protonation states, and stereoisomers are enumerated before MW filtering.
+            enumerate_tautomers: bool: Enumerate tautomers (default: True; only applies when enumerate_microstates=True)
+            enumerate_protonation: bool: Enumerate protonation states (default: True; only applies when enumerate_microstates=True)
+            enumerate_stereoisomers: bool: Enumerate stereoisomers (default: True; only applies when enumerate_microstates=True)
+            pH_range: tuple: pH range for protonation enumeration (default: (6.4, 8.4))
+            protonation_precision: float: Dimorphite precision setting (default: 0.5)
+            max_generated_tautomers: Optional[int]: Optional hard cap for generated tautomers per protomer (default: 64; set None to disable)
+            top_tautomers_per_protomer: int: Keep this many top-ranked tautomers (default: 2)
+            tautomer_energy_window_kcal: float: Keep tautomers within this energy window (default: 3.0)
+            max_protomers: int: Maximum protomers per ligand (default: 16)
+            max_stereoisomers: int: Maximum stereoisomers per ligand (default: 16)
+            max_unassigned_stereocenters: int: Skip stereo expansion above this count (default: 2)
+            max_total_microstates: int: Maximum number of microstates per parent ligand,
+                including original (default: 64)
+            enumerate_all_stereocenters: bool: If True, enumerate all stereocenters.
+                If False (default), enumerate only unassigned stereocenters.
         """
 
         self.input_data = input_data
@@ -158,6 +198,20 @@ class LigandPreprocessor:
         self.output_prefix = output_prefix
         self.outpath = outpath
         self.quick_start = quick_start
+        self.enumerate_microstates = enumerate_microstates
+        self.enumerate_tautomers = enumerate_tautomers
+        self.enumerate_protonation = enumerate_protonation
+        self.enumerate_stereoisomers = enumerate_stereoisomers
+        self.enumerate_all_stereocenters = enumerate_all_stereocenters
+        self.pH_range = pH_range
+        self.protonation_precision = protonation_precision
+        self.max_generated_tautomers = max_generated_tautomers
+        self.top_tautomers_per_protomer = top_tautomers_per_protomer
+        self.tautomer_energy_window_kcal = tautomer_energy_window_kcal
+        self.max_protomers = max_protomers
+        self.max_stereoisomers = max_stereoisomers
+        self.max_unassigned_stereocenters = max_unassigned_stereocenters
+        self.max_total_microstates = max_total_microstates
         self.logger = get_logger()
 
         # Set up organized directory structure
@@ -165,9 +219,9 @@ class LigandPreprocessor:
 
     def _check_input_data(self):
         """
-        Check the input data.
+        Check the input data and optionally enumerate microstates.
         Returns:
-            df_clean: pd.DataFrame: Cleaned input data
+            df_clean: pd.DataFrame: Cleaned input data (with microstates if enabled)
         """
         if not os.path.isfile(self.input_data):
             raise FileNotFoundError(f"Input file not found: {self.input_data}")
@@ -189,6 +243,247 @@ class LigandPreprocessor:
 
         # --- Drop duplicates and NaNs ---
         df_clean = df_extracted.drop_duplicates().dropna()
+
+        # --- Microstate enumeration (BEFORE MW filtering) ---
+        if self.enumerate_microstates:
+            self.logger.info(
+                f"Enumerating microstates for {len(df_clean)} ligands "
+                f"(tautomers={self.enumerate_tautomers}, "
+                f"protomers={self.enumerate_protonation}, "
+                f"stereoisomers={self.enumerate_stereoisomers})"
+            )
+
+            enumerated_dfs = []
+            rescued_kekulize_records: List[Dict[str, str]] = []
+            rejected_ligand_records: List[Dict[str, str]] = []
+            for idx, row in df_clean.iterrows():
+                ligand_id = str(row["ID"])
+                input_smiles = str(row["inSMILES"])
+                parsed = parse_smiles_with_kekulize_rescue(
+                    input_smiles, prefer_restandardize=True
+                )
+                if parsed.mol is None:
+                    self.logger.warning(
+                        "Skipping ligand %s due to invalid SMILES after parse QC: %s "
+                        "(sanitize_step=%s)",
+                        ligand_id,
+                        parsed.reason,
+                        parsed.sanitize_failure_step,
+                    )
+                    rejected_ligand_records.append(
+                        {
+                            "ID": ligand_id,
+                            "Input_SMILES": input_smiles,
+                            "Reason": parsed.reason,
+                            "Sanitize_Failure_Step": parsed.sanitize_failure_step or "",
+                            "Stage": "parse",
+                        }
+                    )
+                    continue
+
+                smiles_for_enumeration = parsed.canonical_smiles or input_smiles
+                if is_kekulize_rescue_mode(parsed.parse_mode):
+                    qc_ok, qc_reason = quick_3d_forcefield_qc(parsed.mol)
+                    rescued_kekulize_records.append(
+                        {
+                            "ID": ligand_id,
+                            "Input_SMILES": input_smiles,
+                            "Canonical_SMILES": smiles_for_enumeration,
+                            "Parse_Mode": parsed.parse_mode,
+                            "Reason": parsed.reason,
+                            "Sanitize_Failure_Step": parsed.sanitize_failure_step or "",
+                            "QC_Status": "passed" if qc_ok else "failed",
+                            "QC_Reason": qc_reason,
+                        }
+                    )
+                    if not qc_ok:
+                        repaired = parse_smiles_with_kekulize_rescue(
+                            input_smiles,
+                            prefer_restandardize=True,
+                            allow_openbabel_fallback=True,
+                            force_openbabel_recanonicalization=True,
+                        )
+                        repaired_can = repaired.canonical_smiles or input_smiles
+                        repaired_improves = (
+                            repaired.mol is not None
+                            and repaired_can != smiles_for_enumeration
+                            and repaired.parse_mode.startswith("openbabel_recanonicalized")
+                        )
+
+                        if repaired_improves:
+                            repaired_qc_ok, repaired_qc_reason = quick_3d_forcefield_qc(repaired.mol)
+                            rescued_kekulize_records.append(
+                                {
+                                    "ID": ligand_id,
+                                    "Input_SMILES": input_smiles,
+                                    "Canonical_SMILES": repaired_can,
+                                    "Parse_Mode": repaired.parse_mode,
+                                    "Reason": repaired.reason,
+                                    "Sanitize_Failure_Step": repaired.sanitize_failure_step or "",
+                                    "QC_Status": "passed" if repaired_qc_ok else "failed",
+                                    "QC_Reason": repaired_qc_reason,
+                                }
+                            )
+                            if repaired_qc_ok:
+                                self.logger.info(
+                                    "Recovered ligand %s via OpenBabel recanonicalization after rescue QC failure.",
+                                    ligand_id,
+                                )
+                                parsed = repaired
+                                smiles_for_enumeration = repaired_can
+                            else:
+                                self.logger.warning(
+                                    "Rejecting rescued ligand %s after OpenBabel retry; initial_qc=%s; obabel_qc=%s",
+                                    ligand_id,
+                                    qc_reason,
+                                    repaired_qc_reason,
+                                )
+                                rejected_ligand_records.append(
+                                    {
+                                        "ID": ligand_id,
+                                        "Input_SMILES": input_smiles,
+                                        "Reason": (
+                                            f"kekulize_rescue_qc_failed: {qc_reason}; "
+                                            f"openbabel_retry_qc_failed: {repaired_qc_reason}"
+                                        ),
+                                        "Sanitize_Failure_Step": repaired.sanitize_failure_step or parsed.sanitize_failure_step or "",
+                                        "Stage": "post_rescue_qc_openbabel_retry",
+                                    }
+                                )
+                                continue
+                        else:
+                            self.logger.warning(
+                                "Rejecting rescued ligand %s because post-rescue QC failed: %s",
+                                ligand_id,
+                                qc_reason,
+                            )
+                            rejected_ligand_records.append(
+                                {
+                                    "ID": ligand_id,
+                                    "Input_SMILES": input_smiles,
+                                    "Reason": f"kekulize_rescue_qc_failed: {qc_reason}",
+                                    "Sanitize_Failure_Step": parsed.sanitize_failure_step or "",
+                                    "Stage": "post_rescue_qc",
+                                }
+                            )
+                            continue
+
+                try:
+                    variant_df = enumerate_ligand_microstates(
+                        smiles=smiles_for_enumeration,
+                        input_mol=parsed.mol,
+                        original_id=ligand_id,
+                        do_enumerate_tautomers=self.enumerate_tautomers,
+                        do_enumerate_protonation=self.enumerate_protonation,
+                        do_enumerate_stereoisomers=self.enumerate_stereoisomers,
+                        enumerate_all_stereocenters=self.enumerate_all_stereocenters,
+                        pH_range=self.pH_range,
+                        protonation_precision=self.protonation_precision,
+                        max_generated_tautomers=self.max_generated_tautomers,
+                        top_tautomers_per_protomer=self.top_tautomers_per_protomer,
+                        tautomer_energy_window_kcal=self.tautomer_energy_window_kcal,
+                        max_protomers=self.max_protomers,
+                        max_stereoisomers=self.max_stereoisomers,
+                        max_unassigned_stereocenters=self.max_unassigned_stereocenters,
+                        max_total_microstates=self.max_total_microstates,
+                    )
+                    if variant_df.empty:
+                        rejected_ligand_records.append(
+                            {
+                                "ID": ligand_id,
+                                "Input_SMILES": input_smiles,
+                                "Reason": "microstate_enumeration_returned_empty",
+                                "Sanitize_Failure_Step": "",
+                                "Stage": "microstate_enumeration",
+                            }
+                        )
+                        continue
+                    # Map SMILES column to inSMILES and MolWt to inMolWt
+                    variant_df = variant_df.rename(columns={"SMILES": "inSMILES", "MolWt": "inMolWt"})
+                    enumerated_dfs.append(variant_df)
+
+                except ImportError:
+                    # Mandatory enumeration backend missing (e.g., dimorphite-dl).
+                    # Fail fast rather than silently falling back.
+                    raise
+                except Exception as e:
+                    self.logger.warning(
+                        f"Error enumerating microstates for {ligand_id}: {e}"
+                    )
+                    # Fallback: keep original
+                    fallback_variant_id = "original_0"
+                    fallback_df = pd.DataFrame(
+                        [
+                            {
+                                "ID": f"{ligand_id}__{fallback_variant_id}",
+                                "inSMILES": smiles_for_enumeration,
+                                "inMolWt": row["inMolWt"],
+                                "Variant_Type": "original",
+                                "Variant_ID": fallback_variant_id,
+                                "Parent_ID": ligand_id,
+                            }
+                        ]
+                    )
+                    enumerated_dfs.append(fallback_df)
+
+            rescued_path = os.path.join(
+                self.dir_structure["ligands"], "rescued_kekulize_only.csv"
+            )
+            rejected_path = os.path.join(
+                self.dir_structure["ligands"], "rejected_ligands.csv"
+            )
+            pd.DataFrame(
+                rescued_kekulize_records,
+                columns=[
+                    "ID",
+                    "Input_SMILES",
+                    "Canonical_SMILES",
+                    "Parse_Mode",
+                    "Reason",
+                    "Sanitize_Failure_Step",
+                    "QC_Status",
+                    "QC_Reason",
+                ],
+            ).to_csv(rescued_path, index=False)
+            pd.DataFrame(
+                rejected_ligand_records,
+                columns=[
+                    "ID",
+                    "Input_SMILES",
+                    "Reason",
+                    "Sanitize_Failure_Step",
+                    "Stage",
+                ],
+            ).to_csv(rejected_path, index=False)
+            self.logger.info(
+                "Kekulize-rescue audit: %d rescued entries written to %s",
+                len(rescued_kekulize_records),
+                rescued_path,
+            )
+            self.logger.info(
+                "Ligand rejection audit: %d entries written to %s",
+                len(rejected_ligand_records),
+                rejected_path,
+            )
+
+            if enumerated_dfs:
+                df_clean = pd.concat(enumerated_dfs, ignore_index=True)
+            else:
+                df_clean = pd.DataFrame(
+                    columns=[
+                        "ID",
+                        "inSMILES",
+                        "inMolWt",
+                        "Variant_Type",
+                        "Variant_ID",
+                        "Parent_ID",
+                    ]
+                )
+            self.logger.info(
+                f"Microstate enumeration complete: {len(df_clean)} variants "
+                f"from {len(df_clean['Parent_ID'].unique()) if 'Parent_ID' in df_clean.columns else 0} original ligands"
+            )
+
         self.logger.info(f"Input data preview:\n{df_clean.head()}")
         return df_clean
 
@@ -338,8 +633,14 @@ class LigandPreprocessor:
                 if s is None or pd.isna(s):
                     return None
                 try:
-                    m = Chem.MolFromSmiles(s)
-                    return rdMolDescriptors.CalcExactMolWt(m) if m is not None else None
+                    parsed = parse_smiles_with_kekulize_rescue(
+                        s, prefer_restandardize=True
+                    )
+                    return (
+                        rdMolDescriptors.CalcExactMolWt(parsed.mol)
+                        if parsed.mol is not None
+                        else None
+                    )
                 except Exception:
                     return None
 
@@ -385,10 +686,15 @@ class LigandPreprocessor:
             )
 
         # --- Save output files ---
+        # Include variant columns if they exist
+        base_cols = ["ID", "inSMILES", "inMolWt", "SMILES", "MolWt"]
+        variant_cols = ["Variant_Type", "Variant_ID", "Parent_ID"]
+        
         small_outfile = os.path.join(
             self.dir_structure["ligands"], f"{self.output_prefix}_smallMW.csv"
         )
-        df_clean_small[["ID", "inSMILES", "inMolWt", "SMILES", "MolWt"]].to_csv(
+        output_cols = base_cols + [col for col in variant_cols if col in df_clean_small.columns]
+        df_clean_small[output_cols].to_csv(
             small_outfile, index=False
         )
         self.logger.info(
@@ -401,7 +707,8 @@ class LigandPreprocessor:
             large_outfile = os.path.join(
                 self.dir_structure["ligands"], f"{self.output_prefix}_largeMW.csv"
             )
-            df_clean_large[["ID", "inSMILES", "inMolWt", "SMILES", "MolWt"]].to_csv(
+            output_cols = base_cols + [col for col in variant_cols if col in df_clean_large.columns]
+            df_clean_large[output_cols].to_csv(
                 large_outfile, index=False
             )
             self.logger.info(
@@ -413,7 +720,8 @@ class LigandPreprocessor:
             too_small_outfile = os.path.join(
                 self.dir_structure["ligands"], f"{self.output_prefix}_tooSmallMW.csv"
             )
-            df_clean_too_small[["ID", "inSMILES", "inMolWt", "SMILES", "MolWt"]].to_csv(
+            output_cols = base_cols + [col for col in variant_cols if col in df_clean_too_small.columns]
+            df_clean_too_small[output_cols].to_csv(
                 too_small_outfile, index=False
             )
             self.logger.info(
@@ -479,7 +787,8 @@ class LigandPreprocessor:
             )
 
             # Update the small_mw file with only compatible ligands
-            df_clean_small[["ID", "inSMILES", "inMolWt", "SMILES", "MolWt"]].to_csv(
+            output_cols = base_cols + [col for col in variant_cols if col in df_clean_small.columns]
+            df_clean_small[output_cols].to_csv(
                 small_outfile, index=False
             )
             output_files["small_mw"] = small_outfile
@@ -516,7 +825,8 @@ class LigandPreprocessor:
         try:
             if smiles is None or pd.isna(smiles):
                 return None
-            mol = Chem.MolFromSmiles(smiles)
+            parsed = parse_smiles_with_kekulize_rescue(smiles, prefer_restandardize=True)
+            mol = parsed.mol
             if mol is None:
                 return None
             return Descriptors.MolWt(mol)
@@ -548,7 +858,8 @@ class LigandPreprocessor:
         Returns:
             list: List of tuples, each containing a metal symbol and a context
         """
-        mol = Chem.MolFromSmiles(smiles)
+        parsed = parse_smiles_with_kekulize_rescue(smiles, prefer_restandardize=True)
+        mol = parsed.mol
         if mol is None:
             return [("Invalid", "Invalid SMILES")]
 
@@ -715,10 +1026,12 @@ class LigandPreprocessor:
         if logger is None:
             logger = get_logger()
         try:
-            # Parse molecule without automatic sanitization
-            mol = Chem.MolFromSmiles(smiles, sanitize=False)
+            parsed = parse_smiles_with_kekulize_rescue(
+                smiles, prefer_restandardize=True
+            )
+            mol = parsed.mol
             if mol is None:
-                logger.warning(f"Invalid SMILES: {smiles}")
+                logger.warning(f"Invalid SMILES: {smiles}; reason={parsed.reason}")
                 return None
 
             # Split into fragments
@@ -728,6 +1041,14 @@ class LigandPreprocessor:
 
             # Pick the largest fragment (by atom count)
             largest = max(frags, key=lambda m: m.GetNumAtoms())
+            try:
+                sanitize_ops = (
+                    Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE
+                )
+                Chem.SanitizeMol(largest, sanitizeOps=sanitize_ops)
+            except Exception:
+                # Keep best-effort behavior for edge-case aromatic systems.
+                pass
 
             # Return canonical SMILES
             canonical = Chem.MolToSmiles(largest, canonical=True)
@@ -804,10 +1125,16 @@ class LigandPreprocessor:
         """
         if logger is None:
             logger = get_logger()
-        mol = Chem.MolFromSmiles(smiles)
+        parsed = parse_smiles_with_kekulize_rescue(smiles, prefer_restandardize=True)
+        mol = parsed.mol
         if mol is None:
-            logger.warning(f"Invalid SMILES: {smiles}")
+            logger.warning(f"Invalid SMILES: {smiles}; reason={parsed.reason}")
             return False
+        if is_kekulize_rescue_mode(parsed.parse_mode):
+            logger.info(
+                "Using kekulize-only rescued parse for conformer validation "
+                f"(smiles={smiles}, mode={parsed.parse_mode})."
+            )
 
         if add_hs:
             mol = Chem.AddHs(mol)

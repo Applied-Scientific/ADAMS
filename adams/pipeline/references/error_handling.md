@@ -29,17 +29,8 @@ Errors that affect a single ligand (or pose in MD) only. When raised, the pipeli
 - Conformer generation failures
 - Ligand preparation issues
 - Individual docking failures
-- MD simulation failures (via PerPoseError subclass)
 
 **Handling**: Log warning, skip ligand/pose, continue with next ligand/pose.
-
-#### PerPoseError (MD-specific)
-A subclass of PerLigandError for MD simulations. MD poses are treated like ligands - when a pose fails, the pipeline skips it and continues with remaining poses. Common causes:
-- GROMACS equilibration failures (NVT, NPT)
-- Production MD simulation crashes
-- Topology errors for specific poses
-
-**Handling**: Log warning, skip pose, continue with other poses.
 
 ### FatalError
 Fatal errors that should stop the entire pipeline. These are typically caused by:
@@ -64,12 +55,6 @@ The pipeline uses a global SIGINT handler that provides immediate, clean shutdow
 2. **Main Process**: Catches `KeyboardInterrupt`, terminates workers, and returns control to user
 
 3. **Workers**: Check `is_sigint_pending()` at iteration boundaries and exit early if detected
-
-### MD-Specific SIGINT Behavior
-MD simulations have multiple phases (NVT, NPT, production MD). The pipeline checks for SIGINT:
-- Before starting each pose
-- Before each MD phase (NVT, NPT, production)
-- This allows quick shutdown even during long-running simulations
 
 ### Setup
 ```python
@@ -161,7 +146,7 @@ def dock_ligand(v, ligand_id, ligand_pdbqt):
 ```python
 from adams.error_handling import safe_meeko_preparation
 
-result = safe_meeko_preparation(mol, "lig_001")
+result = safe_meeko_preparation(mol, "lig_001", charge_model="gasteiger")
 # Returns: (pdbqt_string, is_ok) or raises MeekoPreparationError
 ```
 
@@ -192,7 +177,7 @@ def _autodock_worker(self, batch, worker_id, log_queue):
     
     # Initialize resources
     v = Vina(...)
-    ligprep = MoleculePreparation()
+    ligprep = MoleculePreparation(charge_model="gasteiger")
     
     # Process each ligand
     for idx, (lig_idx, grid_idx) in enumerate(batch):
@@ -241,50 +226,6 @@ def _dock_pocket_chunk_worker(self, prepared_ligand_dir, ligand_indices, site_id
         logger.error(f"GPU docking failed for pocket {pocket_idx} with return code {e.returncode}")
         # For batch processing, log error but don't crash worker
         raise
-```
-
-### MD Worker Pattern
-
-```python
-def _gro_run(self, pose_name):
-    """Run MD simulation for a single pose with error recovery."""
-    # Configure logging
-    configure_worker_logging(log_queue)
-    logger = get_logger()
-    
-    # Check for SIGINT before starting work
-    if is_sigint_pending():
-        logger.info(f"MD worker: SIGINT detected for pose {pose_name}, exiting")
-        return False
-    
-    try:
-        # Check before each phase
-        if is_sigint_pending():
-            return False
-        
-        # NVT equilibration
-        _launch_gro(gmx_binary, ...)
-        
-        if is_sigint_pending():
-            return False
-        
-        # NPT equilibration
-        _launch_gro(gmx_binary, ...)
-        
-        if is_sigint_pending():
-            return False
-        
-        # Production MD
-        _launch_gro(gmx_binary, ...)
-        
-        return True
-        
-    except subprocess.CalledProcessError as e:
-        logger.error(f"MD failed for pose {pose_name} (exit code {e.returncode})")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error for pose {pose_name}: {e}")
-        return False
 ```
 
 ## Error Handling Best Practices
@@ -433,7 +374,7 @@ Run Context:
 - Output folder: /full/path/to/output_folder
 - Log file: /full/path/to/adams_pipeline.log
 - Steps completed: preprocessing, docking
-- Step failed: md_analysis
+- Step failed: docking
 
 Error Details:
 [error message]
@@ -442,7 +383,7 @@ Likely Cause:
 [brief explanation]
 
 To Resume:
-- Entry point: md_protein_topology (or appropriate entry point)
+- Entry point: (e.g. production_docking or appropriate entry point from entry_points.md)
 - Required files: [list paths that will be needed]
 ```
 

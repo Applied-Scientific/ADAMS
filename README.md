@@ -2,7 +2,7 @@
 
 https://github.com/user-attachments/assets/0a92b767-21b2-4e42-9dd1-53801a984627
 
-ADAMS is an autonomous orchestration framework designed for computational chemists, biophysicists, and structural biologists. It streamlines the transition from raw structural data to high-confidence lead candidates by integrating structural refinement and global site discovery into a single agentic pipeline.
+ADAMS is an autonomous orchestration framework designed for computational chemists, biophysicists, and structural biologists. It streamlines the transition from raw structural data to high-confidence lead candidates by integrating structural refinement and global site discovery into a single agentic pipeline. With safety and security in mind, all inputs, intermediates, and results stay on your machine. Run logs, agent metadata/memories and other ADAMS produced data live under agent_data; nothing is sent to external servers. You provide and control your own LLM API key; ADAMS does not collect or store credentials.
 
 ## Core Scientific Capabilities
 

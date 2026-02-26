@@ -76,6 +76,13 @@ The agents will guide you through pocket discovery and production docking.
 
 ---
 
+## Privacy & Security
+
+- **Local data**: All inputs, intermediates, and results stay on your machine. Run logs, agent metadata/memories and other ADAMS produced data live under `agent_data`; nothing is sent to external servers.
+- **Your API key**: You provide and control your own LLM API key; ADAMS does not collect or store credentials.
+
+---
+
 ## Documentation
 
 - **[TMI.md](TMI.md)** - Detailed technical documentation on installation, file organization, and pipeline architecture.

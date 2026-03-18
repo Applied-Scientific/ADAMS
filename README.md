@@ -13,6 +13,7 @@ ADAMS automates the decision-heavy segments of the drug discovery workflow, allo
 - **Receptor Cleaning**: Automated handling of multi-chain structures, water molecules, and essential heterogens.
 - **Precision Protonation**: Leverages **PDB2PQR** and **PROPKA** to assign pKa-dependent protonation states, ensuring realistic electrostatic environments for docking.
 - **Missing Atom Recovery**: Intelligent restoration of missing side-chains and loop regions.
+- **Ligand microstate enumeration**: Tautomers, protonation states, and stereoisomer enumeration. Conformer generation with energy optimization & filtering.
 
 ### 2. Global Site Discovery (Blind Docking)
 

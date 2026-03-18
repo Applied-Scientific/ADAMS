@@ -85,12 +85,13 @@ def read_reference_file(reference_name: str) -> dict:
     - `directory_structure.md` - Directory structure and file organization patterns
     - `file_path_mapping.md` - File path mapping rules between pipeline agents
     - `workflow_examples.md` - Example workflow prompts and patterns
-    - `error_handling.md` - Error handling patterns and report formats
+    - `error_handling.md` - Error handling patterns and report formats (developer reference)
+    - `agent_error_handling.md` - Agent procedure, report format, and escalation (for stage/workflow/executive agents)
 
     Args:
         reference_name (str): Name of the reference file to read.
             Examples: "entry_points.md", "parameter_defaults.md", "directory_structure.md",
-            "workflow_examples.md", "error_handling.md", "file_path_mapping.md"
+            "workflow_examples.md", "error_handling.md", "agent_error_handling.md", "file_path_mapping.md"
             Can include or omit the .md extension.
 
     Returns:

@@ -1,7 +1,5 @@
 """
-    File Parser Agent - Extracts structured statistics from pipeline outputs
-    (docking results CSV and MD results) to enable parameter extraction and
-    result-based decision making.
+File Parser Agent - Extracts structured statistics from pipeline outputs.
 """
 
 from pathlib import Path
@@ -15,19 +13,19 @@ from .file_parser_tools import parse_docking_results_impl, parse_md_results_impl
 @function_tool
 def parse_docking_results(csv_path: str) -> dict:
     """
-    Parse docking results CSV and extract statistics for parameter decisions.
+    Parse docking results CSV and extract compact statistics.
 
     This function reads a docking results CSV file (e.g., production_docking_results.csv)
     and extracts comprehensive statistics including affinity metrics, pose counts,
-    pocket analysis, and affinity distributions. Use this to extract optimal parameters
-    from previous run results or to summarize docking outcomes.
+    pocket analysis, and affinity distributions. Use this to summarize docking outcomes
+    or provide evidence for downstream decisions.
 
     Use this when:
-    - You need to determine optimal `tops` parameter for MD based on pose counts per ligand
-    - You want to analyze affinity distribution to inform parameter decisions
+    - You want to summarize affinity and pose-count behavior
+    - You need evidence about available poses per ligand or pocket
     - You need to identify which pockets had the best results
     - You want to summarize docking results for the user
-    - You need to extract statistics to recommend next-step parameters
+    - You want compact evidence instead of loading the CSV into prompt context
 
     Args:
         csv_path (str): Path to docking results CSV file. Can be relative to agent_data
@@ -88,7 +86,7 @@ def parse_md_results(md_dir: str) -> dict:
     - You want to identify which poses have completed MD simulations
     - You need to find analysis reports from MD runs
     - You want to verify MD pipeline completion status
-    - You need to determine if MD results are ready for analysis
+    - You need to determine if MD results are ready for downstream analysis
 
     Args:
         md_dir (str): Path to MD analysis directory or parent directory containing md_analysis/.
@@ -129,14 +127,26 @@ def parse_md_results(md_dir: str) -> dict:
 prompt_path = Path(__file__).parent / "file_parser_prompt.md"
 system_prompt = prompt_path.read_text()
 
-file_parser_agent = Agent(
-    model="gpt-5-mini",
-    name="File Parser Agent",
-    instructions=system_prompt,
-    tools=[
-        read_reference_file,
-        parse_docking_results,
-        parse_md_results,
-    ],
-    model_settings=ModelSettings(tool_choice="auto"),
-)
+_file_parser_agent = None
+_file_parser_model = None
+
+
+def get_file_parser_agent() -> Agent:
+    global _file_parser_agent, _file_parser_model
+    from ...model_config import get_current_model_name, get_resolved_model
+
+    current_model = get_current_model_name()
+    if _file_parser_agent is None or _file_parser_model != current_model:
+        _file_parser_agent = Agent(
+            model=get_resolved_model(),
+            name="File Parser Agent",
+            instructions=system_prompt,
+            tools=[
+                read_reference_file,
+                parse_docking_results,
+                parse_md_results,
+            ],
+            model_settings=ModelSettings(tool_choice="auto"),
+        )
+        _file_parser_model = current_model
+    return _file_parser_agent

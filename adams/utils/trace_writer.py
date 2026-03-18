@@ -20,13 +20,10 @@ from typing import Any, Dict, Optional
 
 from agents.tracing import (
     AgentSpanData,
-    CustomSpanData,
     FunctionSpanData,
     GenerationSpanData,
-    GuardrailSpanData,
     HandoffSpanData,
     Span,
-    SpanData,
     Trace,
     TracingProcessor,
 )
@@ -39,28 +36,45 @@ class JsonTraceProcessor(TracingProcessor):
     Only captures meaningful events:
     - Agent runs (start/end with timing)
     - Tool calls (with inputs and outputs)
+    - LLM Generations (prompts and responses)
     - Errors
 
     Skips internal SDK spans like ResponseSpanData for cleaner output.
     """
 
-    def __init__(self, output_dir: str = "agent_data/traces"):
+    def __init__(self, output_dir: str = "agent_data/traces", session_id: Optional[str] = None):
         """
         Initialize the JSON trace processor.
 
         Args:
             output_dir: Directory to write trace files.
+            session_id: Optional session ID to continue. If None, creates a new session.
         """
         self.output_dir = output_dir
-        self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filepath = os.path.join(output_dir, f"trace_{self.session_id}.jsonl")
         self._ensure_dir()
 
         # Track active spans for computing durations
         self._span_start_times: Dict[str, datetime] = {}
         self._span_agents: Dict[str, str] = {}  # Map span_id to agent name for context
+        self._shutdown_written = False
 
-        self._write_session_header()
+        # Only write session header if this is a new session
+        if session_id is None:
+            self._write_session_header()
+            self._register_session()
+        else:
+            # Continuing existing session — ensure the session record exists in
+            # sessions.json (handles cleared/corrupted files and updates the
+            # timestamp so the session appears recent in listings).
+            self._ensure_session_registered()
+            continuation_event = {
+                "event": "session_continued",
+                "session_id": self.session_id,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self._write_event(continuation_event)
 
     def _ensure_dir(self) -> None:
         """Create the output directory if it doesn't exist."""
@@ -74,6 +88,28 @@ class JsonTraceProcessor(TracingProcessor):
             "timestamp": datetime.now().isoformat(),
         }
         self._write_event(header)
+
+    def _register_session(self) -> None:
+        """Register session in memory system."""
+        try:
+            from ..memory.session_memory import register_session
+
+            register_session(self.session_id, self.filepath)
+        except Exception:
+            pass
+
+    def _ensure_session_registered(self) -> None:
+        """Ensure the session record exists (for continued sessions).
+
+        Creates the record if missing, updates the timestamp if present.
+        This guarantees plan linking via add_session_plan_path always has a target.
+        """
+        try:
+            from ..memory.session_memory import ensure_session
+
+            ensure_session(self.session_id, self.filepath)
+        except Exception:
+            pass
 
     def write_user_input(self, user_input: str) -> None:
         """Write user input to the trace file."""
@@ -98,6 +134,8 @@ class JsonTraceProcessor(TracingProcessor):
         try:
             # Clean up None values for readability
             clean_event = {k: v for k, v in event.items() if v is not None}
+            trace_path = Path(self.filepath)
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.filepath, "a", encoding="utf-8") as f:
                 f.write(
                     json.dumps(
@@ -106,6 +144,22 @@ class JsonTraceProcessor(TracingProcessor):
                     + "\n"
                 )
                 f.flush()
+        except FileNotFoundError:
+            try:
+                # Parent directory may be recreated asynchronously; recover once.
+                trace_path = Path(self.filepath)
+                trace_path.parent.mkdir(parents=True, exist_ok=True)
+                clean_event = {k: v for k, v in event.items() if v is not None}
+                with open(self.filepath, "a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            clean_event, default=self._json_serializer, ensure_ascii=False
+                        )
+                        + "\n"
+                    )
+                    f.flush()
+            except Exception as e:
+                print(f"[JsonTraceProcessor] Warning: Failed to write event: {e}")
         except Exception as e:
             print(f"[JsonTraceProcessor] Warning: Failed to write event: {e}")
 
@@ -127,9 +181,11 @@ class JsonTraceProcessor(TracingProcessor):
         if span_data is None:
             return False
 
-        # Only log agent spans and function spans
-        # Skip ResponseSpanData, GenerationSpanData (too verbose), etc.
-        return isinstance(span_data, (AgentSpanData, FunctionSpanData, HandoffSpanData))
+        # Log agent spans, function spans, and generation (LLM) spans
+        return isinstance(
+            span_data,
+            (AgentSpanData, FunctionSpanData, HandoffSpanData, GenerationSpanData),
+        )
 
     def _get_span_type(self, span: Span) -> Optional[str]:
         """Get a human-readable span type."""
@@ -140,6 +196,8 @@ class JsonTraceProcessor(TracingProcessor):
             return "tool_call"
         elif isinstance(span_data, HandoffSpanData):
             return "handoff"
+        elif isinstance(span_data, GenerationSpanData):
+            return "generation"
         return None
 
     def _get_agent_name(self, span: Span) -> Optional[str]:
@@ -161,10 +219,31 @@ class JsonTraceProcessor(TracingProcessor):
                         result["input"] = json.loads(span.span_data.input)
                     else:
                         result["input"] = span.span_data.input
-                except:
+                except (json.JSONDecodeError, TypeError):
                     result["input"] = span.span_data.input
             if hasattr(span.span_data, "output") and span.span_data.output:
                 result["output"] = span.span_data.output
+        return result
+
+    def _get_generation_info(self, span: Span) -> Dict[str, Any]:
+        """Extract LLM generation information from span data."""
+        result = {}
+        if isinstance(span.span_data, GenerationSpanData):
+            if span.span_data.model:
+                result["model"] = span.span_data.model
+            if span.span_data.usage:
+                result["usage"] = span.span_data.usage
+            
+            # Extract input (messages sent to LLM)
+            if span.span_data.input:
+                # This is usually a list of messages. We might want to simplify or log as is.
+                # For now, let's log it, but maybe truncate if huge?
+                result["input"] = span.span_data.input
+            
+            # Extract output (content from LLM)
+            if span.span_data.output:
+                result["output"] = span.span_data.output
+                
         return result
 
     def _find_parent_agent(self, span: Span) -> Optional[str]:
@@ -232,6 +311,13 @@ class JsonTraceProcessor(TracingProcessor):
                 event["input"] = func_info["input"]
 
             self._write_event(event)
+            
+        elif span_type == "generation":
+            # We explicitly do NOT log start for generation to avoid noise, 
+            # unless we want to see latency start. 
+            # But the 'end' event will have the content.
+            # Let's optionally log start if needed, but for now skip to keep clean.
+            pass
 
     def on_span_end(self, span: Span) -> None:
         """Called when a span completes - only log meaningful spans."""
@@ -300,9 +386,39 @@ class JsonTraceProcessor(TracingProcessor):
                 event["error"] = error_info
 
             self._write_event(event)
+            
+        elif span_type == "generation":
+            gen_info = self._get_generation_info(span)
+            parent_agent = self._find_parent_agent(span)
+            
+            event = {
+                "event": "generation",
+                "timestamp": datetime.now().isoformat(),
+                "caller": parent_agent,
+                "duration_sec": duration_sec,
+                "span_id": span.span_id,
+            }
+            
+            # Merge generation info
+            if "model" in gen_info:
+                event["model"] = gen_info["model"]
+            if "input" in gen_info:
+                event["input"] = gen_info["input"]
+            if "output" in gen_info:
+                event["output"] = gen_info["output"]
+            if "usage" in gen_info:
+                event["usage"] = gen_info["usage"]
+                
+            if error_info:
+                event["error"] = error_info
+                
+            self._write_event(event)
 
     def shutdown(self) -> None:
-        """Called when the application stops."""
+        """Called when the application stops. Writes session_end exactly once."""
+        if self._shutdown_written:
+            return
+        self._shutdown_written = True
         event = {
             "event": "session_end",
             "timestamp": datetime.now().isoformat(),
@@ -313,8 +429,3 @@ class JsonTraceProcessor(TracingProcessor):
     def force_flush(self) -> None:
         """Forces immediate processing - no-op since we flush after each write."""
         pass
-
-
-def create_trace_processor(output_dir: str = "agent_data/traces") -> JsonTraceProcessor:
-    """Factory function to create a JsonTraceProcessor."""
-    return JsonTraceProcessor(output_dir=output_dir)

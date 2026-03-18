@@ -50,7 +50,7 @@ When users request any of the following, they mean a **Full Pipeline Run**:
 ### **Pipeline Stage** (or **Stage**)
 A **Pipeline Stage** is one of the three major computational phases that transform data:
 1. **Preprocessing Stage**: Consists of two independent operations that can be run in any order:
-   - **Receptor Preparation**: Cleans receptor PDBs (run_clean_pdb)
+   - **Receptor Preparation**: Cleans receptor PDBs (run_clean_pdb; default keep_heterogens="essential"; optional keep_water)
    - **Ligand Preprocessing**: Processes ligand CSVs (run_ligand_preprocessing)
 2. **Docking Stage**: Discovers binding sites and performs molecular docking
 3. **MD Analysis Stage**: Runs molecular dynamics simulations and stability analysis
@@ -65,7 +65,7 @@ Stages are sequential (preprocessing → docking → MD), but executions can sta
 A **Computational Module** is a Python module that performs the actual scientific computations. These are distinct from agents—they contain the algorithms, data processing logic, and scientific workflows.
 
 **Preprocessing Modules** (independent operations):
-- `clean_pdb.py`: Receptor structure cleaning (receptor preparation)
+- `clean_pdb.py`: Receptor structure cleaning; removes or keeps heterogens/waters (ESSENTIAL_HETEROGENS_TO_KEEP when keep_heterogens="essential")
 - `ligand_preprocessing.py`: Ligand CSV filtering and validation (ligand preprocessing)
 
 **Docking Modules**:
@@ -75,7 +75,7 @@ A **Computational Module** is a Python module that performs the actual scientifi
 **MD Analysis Modules**:
 - `protein_topology.py`: Protein parameterization
 - `lig_prepare.py`: Ligand preparation for MD
-- `run_gro.py`: GROMACS simulation execution
+- `simulate/soluble_md.py` and `simulate/membrane_md.py`: GROMACS/OpenMM simulation execution
 - `stability_analysis.py`: Trajectory analysis
 
 **Example**: "The `vina_dock.py` computational module handles both CPU and GPU docking."

@@ -10,6 +10,64 @@ from rdkit.Chem import AllChem
 
 from ...logger_utils import get_logger
 from ...utils import run_cmd
+from ..charge_model import validate_charge_model
+
+# ----------------------------------------------------------------------
+# Named constants
+# ----------------------------------------------------------------------
+
+MINIMIZED_BOX_SIZE = [5, 5, 5]
+"""Box size (Angstrom) for minimized docking — small, focused box."""
+
+PRODUCTION_BOX_SIZE = [20, 20, 20]
+"""Default box size (Angstrom) for production docking (CPU Vina)."""
+
+SPACE_NAME_GRID = "_grid_"
+"""Pose filename infix for search mode: ligand_{idx}_grid_{g}_docked.pdbqt"""
+
+SPACE_NAME_POCKET = "_pocket_"
+"""Pose filename infix for production mode: ligand_{idx}_pocket_{p}_docked.pdbqt"""
+
+# ----------------------------------------------------------------------
+# Box size helper
+# ----------------------------------------------------------------------
+
+
+def get_docking_box_size(
+    minimized_dock,
+    mode,
+    search_gridsize,
+    max_mw=None,
+    production_gridsize=None,
+):
+    """
+    Determine the docking box size based on mode and parameters.
+
+    Args:
+        minimized_dock: If True, return a small focused box.
+        mode: "search" or "production".
+        search_gridsize: Grid size (Angstrom) used in search mode.
+        max_mw: Maximum molecular weight of the ligand set. When provided
+            in production mode, use flexible_box_size() (MW-adaptive).
+            When None, use a fixed PRODUCTION_BOX_SIZE.
+        production_gridsize: Optional explicit production box size in Angstrom.
+            When provided, this overrides both PRODUCTION_BOX_SIZE and MW-adaptive
+            sizing.
+
+    Returns:
+        list: [x, y, z] box dimensions in Angstrom.
+    """
+    if minimized_dock:
+        return list(MINIMIZED_BOX_SIZE)
+    elif mode == "search":
+        return [search_gridsize] * 3
+    elif production_gridsize is not None:
+        return [production_gridsize] * 3
+    elif max_mw is not None:
+        return flexible_box_size(max_mw)
+    else:
+        return list(PRODUCTION_BOX_SIZE)
+
 
 # ----------------------------------------------------------------------
 # Utility Functions
@@ -149,6 +207,60 @@ def get_ligand_com_from_pdbqt_string(pdbqt_string):
     return center.tolist()
 
 
+def shift_pdbqt_to_center(pdbqt_string, target_center, source_center_mode="bbox"):
+    """
+    Shift all ATOM/HETATM coordinates in a PDBQT string so the ligand's
+    center moves to target_center. Ensures the ligand starts inside
+    the docking grid and avoids "ligand is outside the grid box" errors.
+
+    Args:
+        pdbqt_string: PDBQT content (single or multi-model).
+        target_center: [x, y, z] target position in Angstroms.
+        source_center_mode: How to compute the current ligand center:
+            - "bbox" (default): center of axis-aligned bounding box
+            - "com": geometric center (mean coordinates)
+
+    Returns:
+        str: PDBQT string with coordinates shifted (same structure).
+    """
+    target = np.array(target_center, dtype=float)
+    lines = pdbqt_string.splitlines()
+    out_lines = []
+    coords = []
+
+    for line in lines:
+        if line.startswith("HETATM") or line.startswith("ATOM"):
+            x = float(line[30:38])
+            y = float(line[38:46])
+            z = float(line[46:54])
+            coords.append([x, y, z])
+        out_lines.append(line)
+
+    if not coords:
+        return pdbqt_string
+
+    coords_np = np.array(coords)
+    if source_center_mode == "bbox":
+        source_center = (coords_np.min(axis=0) + coords_np.max(axis=0)) / 2.0
+    elif source_center_mode == "com":
+        source_center = coords_np.mean(axis=0)
+    else:
+        raise ValueError(
+            f"source_center_mode must be 'bbox' or 'com', got: {source_center_mode}"
+        )
+    shift = target - source_center
+
+    idx = 0
+    for i, line in enumerate(out_lines):
+        if line.startswith("HETATM") or line.startswith("ATOM"):
+            x, y, z = coords[idx][0] + shift[0], coords[idx][1] + shift[1], coords[idx][2] + shift[2]
+            idx += 1
+            # Preserve PDB column widths (x: 30:38, y: 38:46, z: 46:54)
+            out_lines[i] = line[:30] + f"{x:8.3f}" + f"{y:8.3f}" + f"{z:8.3f}" + line[54:]
+
+    return "\n".join(out_lines) + ("\n" if pdbqt_string.endswith("\n") else "")
+
+
 def get_all_model_centers(input_file):
     """Return COM for each MODEL in a multi-model PDBQT."""
     centers = []
@@ -161,24 +273,81 @@ def get_all_model_centers(input_file):
     return centers
 
 
-def get_ligand_com_from_pdb(pdb_file, lig_resname):
+def get_ligand_com_from_pdb(pdb_file, ligand_selector):
     """
-    Calculate center of mass (geometric center) for a ligand
-    with residue name `lig_resname` from a PDB file.
+    Calculate geometric center for one ligand in a PDB complex.
+
+    Supported selector formats:
+      - "LIG"            -> residue name only (must be unique in structure)
+      - "LIG:A"          -> residue name + chain
+      - "LIG:A:123"      -> residue name + chain + residue number
+      - "LIG:A:123A"     -> residue name + chain + residue number + insertion code
     """
-    coords = []
+    if ligand_selector is None:
+        raise ValueError("ligand selector cannot be None")
+
+    token = str(ligand_selector).strip()
+    if not token:
+        raise ValueError("ligand selector cannot be empty")
+
+    parts = [part.strip() for part in token.split(":")]
+    if len(parts) > 3 or not parts[0]:
+        raise ValueError(
+            "Invalid ligand selector format. Use 'RES', 'RES:CHAIN', or 'RES:CHAIN:RESSEQ'. "
+            f"Got: '{ligand_selector}'"
+        )
+
+    resname_filter = parts[0]
+    chain_filter = parts[1] if len(parts) >= 2 and parts[1] else None
+    resseq_filter = parts[2] if len(parts) == 3 and parts[2] else None
+
+    residues = {}
     with open(pdb_file, "r") as f:
         for line in f:
-            if line.startswith(("HETATM", "ATOM")):
-                resname = line[17:20].strip()
-                if resname == lig_resname:
-                    x = float(line[30:38])
-                    y = float(line[38:46])
-                    z = float(line[46:54])
-                    coords.append([x, y, z])
-    if not coords:
-        raise ValueError(f"No atoms found for residue '{lig_resname}' in {pdb_file}")
-    coords = np.array(coords)
+            if not line.startswith(("HETATM", "ATOM")):
+                continue
+
+            resname = line[17:20].strip()
+            if resname != resname_filter:
+                continue
+
+            chain_id = line[21:22].strip()
+            if chain_filter is not None and chain_id != chain_filter:
+                continue
+
+            resseq = line[22:26].strip()
+            icode = line[26:27].strip()
+            resseq_with_icode = f"{resseq}{icode}" if icode else resseq
+            if resseq_filter is not None and (
+                resseq_filter != resseq and resseq_filter != resseq_with_icode
+            ):
+                continue
+
+            residue_key = (resname, chain_id, resseq, icode)
+            residues.setdefault(residue_key, []).append(
+                [float(line[30:38]), float(line[38:46]), float(line[46:54])]
+            )
+
+    if not residues:
+        raise ValueError(
+            f"No atoms found for ligand selector '{ligand_selector}' in {pdb_file}"
+        )
+
+    if len(residues) > 1:
+        available = sorted(
+            f"{res}:{chain or '-'}:{seq}{icode}"
+            for (res, chain, seq, icode) in residues.keys()
+        )
+        preview = ", ".join(available[:8])
+        if len(available) > 8:
+            preview += ", ..."
+        raise ValueError(
+            f"Ligand selector '{ligand_selector}' is ambiguous in {pdb_file}. "
+            f"Matched residues: {preview}. "
+            "Use a specific selector like 'RES:CHAIN' or 'RES:CHAIN:RESSEQ'."
+        )
+
+    coords = np.array(next(iter(residues.values())))
     return coords.mean(axis=0).tolist()
 
 
@@ -548,19 +717,17 @@ def get_molweight_from_pdbqt(pdbqt_file):
     """
     from rdkit.Chem import Descriptors
 
-    # Try reading with RDKit first (only works for standard PDB files, not PDBQT)
-    # PDBQT files contain AutoDock atom types that RDKit doesn't recognize
-    mol = None
-    try:
-        mol = Chem.MolFromPDBFile(pdbqt_file, removeHs=False)
-        if mol is not None:
-            return Descriptors.MolWt(mol)
-    except Exception:
-        # RDKit will fail on PDBQT files due to AutoDock atom types (e.g., 'A' for aromatic carbon)
-        # Fall through to manual parsing
-        pass
+    # Only use RDKit for non-PDBQT files; PDBQT uses AutoDock atom types (e.g. 'A' for aromatic C)
+    # which RDKit rejects (Element 'A' not found), so we skip it and use manual parsing for PDBQT.
+    if not pdbqt_file.lower().endswith(".pdbqt"):
+        try:
+            mol = Chem.MolFromPDBFile(pdbqt_file, removeHs=False)
+            if mol is not None:
+                return Descriptors.MolWt(mol)
+        except Exception:
+            pass
 
-    # Fallback: manually parse PDBQT file and map AutoDock atom types to elements
+    # Parse PDBQT (or fallback for other formats): map AutoDock atom types to elements
     # AutoDock atom type mapping (common types)
     autodock_to_element = {
         # Carbon types
@@ -674,36 +841,62 @@ def get_molweight_from_pdbqt(pdbqt_file):
     return total_weight
 
 
-def convert_receptor_to_pdbqt(receptor_path):
+def convert_receptor_to_pdbqt(
+    receptor_path, protonate: bool = False, pH: float = 7.4, charge_model: str = "gasteiger"
+):
     """
-    Convert receptor PDB file to PDBQT format using Open Babel command-line tool.
+    Convert receptor PDB file to PDBQT format using Open Babel.
 
-    This function uses the obabel command-line tool via subprocess to avoid
-    Python binding ABI compatibility issues.
-
-    The PDBQT file is stored in the same directory as the input PDB file,
-    ensuring it's co-located with the source file and independent of the
-    current working directory.
+    Default charge_model is "gasteiger" for consistency with ligand preparation
+    (Meeko). Supported OpenBabel values include gasteiger, eem, mmff94, qeq, qtpie.
 
     Args:
-        receptor_path: str: Path to the receptor PDB file
+        receptor_path: Path to receptor PDB file (should be pre-protonated)
+        protonate: If True, allow OpenBabel to add hydrogens (default: False)
+        pH: pH value for protonation (default: 7.4). Only used if protonate=True.
+        charge_model: Partial charge method for Open Babel (default: "gasteiger").
 
     Returns:
-        str: Path to the converted PDBQT file
+        str: Path to converted PDBQT file
     """
+    charge_model = validate_charge_model(charge_model)
+
     # Get the directory of the input PDB file
     receptor_dir = os.path.dirname(os.path.abspath(receptor_path))
 
     # Extract filename without extension and create PDBQT path in the same directory
-    protprefix = receptor_path.split(".pdb")[0]
-    protstem = os.path.basename(protprefix)
-    receptor_pdbqt = os.path.join(receptor_dir, f"{protstem}.pdbqt")
+    protstem = os.path.splitext(os.path.basename(receptor_path))[0]
+    safe_charge_model = "".join(c if c.isalnum() else "_" for c in charge_model)
+    receptor_pdbqt_name = f"{protstem}__q_{safe_charge_model}.pdbqt"
+    if protonate:
+        safe_ph = str(pH).replace(".", "p")
+        receptor_pdbqt_name = f"{protstem}__q_{safe_charge_model}__ph_{safe_ph}.pdbqt"
+    receptor_pdbqt = os.path.join(receptor_dir, receptor_pdbqt_name)
 
     # Check if PDBQT file already exists
     if os.path.exists(receptor_pdbqt):
         logger = get_logger()
-        logger.info(f"Receptor PDBQT file already exists: {receptor_pdbqt}")
-        return receptor_pdbqt
+        try:
+            pdbqt_mtime = os.path.getmtime(receptor_pdbqt)
+            source_mtime = os.path.getmtime(receptor_path)
+        except OSError:
+            pdbqt_mtime = None
+            source_mtime = None
+
+        if (
+            pdbqt_mtime is not None
+            and source_mtime is not None
+            and pdbqt_mtime >= source_mtime
+        ):
+            logger.info(
+                f"Receptor PDBQT file already exists for charge_model={charge_model}: {receptor_pdbqt}"
+            )
+            return receptor_pdbqt
+
+        logger.info(
+            "Receptor PDBQT exists but source receptor is newer; regenerating: %s",
+            receptor_pdbqt,
+        )
 
     # Convert PDB to PDBQT using Open Babel
     logger = get_logger()
@@ -724,14 +917,15 @@ def convert_receptor_to_pdbqt(receptor_path):
             receptor_path,
             "-O",
             receptor_pdbqt,
-            "-p",
-            "7.4",
             "--partialcharge",
-            "eem",
+            charge_model,
             "-xr",
             "-xp",
             "-xn",
         ]
+        
+        if protonate:
+            cmd.extend(["-p", str(pH)])
 
         # Use run_cmd to redirect output to logger
         run_cmd(cmd, check=True)

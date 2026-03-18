@@ -1,133 +1,111 @@
 # ADAMS: Agent-Driven Autonomous Molecular Simulations
 
-![screenshot](docs/agentic_workflow.png)
+https://github.com/user-attachments/assets/c1a7ebcd-be1a-41fc-a5c9-1396e6ca0974
 
-## Table of Contents
+ADAMS is an autonomous orchestration framework designed for computational chemists, biophysicists, and structural biologists. It streamlines the transition from raw structural data to high-confidence lead candidates by integrating structural refinement, global site discovery, and molecular dynamics-based stability validation into a single agentic pipeline.
 
-- [Introduction](#introduction)
-- [Quick Start](#quick-start)
-- [Installation & Requirements](#installation--requirements)
+## Core Scientific Capabilities
+
+ADAMS automates the decision-heavy segments of the drug discovery workflow, allowing researchers to focus on hypothesis generation rather than file format plumbing.
+
+### 1. Structural Refinement & pKa-Aware Preparation
+
+- **Receptor Cleaning**: Automated handling of multi-chain structures, water molecules, and essential heterogens.
+- **Precision Protonation**: Leverages **PDB2PQR** and **PROPKA** to assign pKa-dependent protonation states, ensuring realistic electrostatic environments for docking.
+- **Missing Atom Recovery**: Intelligent restoration of missing side-chains and loop regions.
+
+### 2. Global Site Discovery (Blind Docking)
+
+- **Pocket Mapping**: Surface-wide grid generation for identifying novel allosteric or orthosteric binding sites without prior pocket knowledge.
+- **Cluster Analysis**: Autonomous identification of high-affinity centers through density-based clustering of search-mode poses.
+
+### 3. Production-Grade Pose Generation
+
+- **Targeted Refinement**: High-exhaustiveness docking at identified binding centers using flexible-box sampling.
+- **Multi-Backend Support**: Seamlessly switch between CPU and GPU-accelerated engines (AutoDock Vina, Vina-GPU 2.1, Uni-Dock) based on library size and hardware availability.
+
+### 4. Dynamic Stability Assessment (MD Analysis)
+
+- **Trajectory Generation**: Automated GROMACS setup including energy minimization, NVT/NPT equilibration, and production MD (10-100+ ns).
+- **Binding Persistence**: Differentiates between transient docking artifacts and stable binders through RMSD, RMSF, and hydrogen-bond persistence analysis.
+- **Automated Interpretation**: Agent-driven evaluation of trajectories to prioritize stable poses for experimental validation.
 
 ---
 
-## Introduction
-ADAMS is an agentic pipeline for biomolecular docking and stability analysis. It automates the full workflow from raw `PDB` and ligand lists to pocket discovery, production docking, and MD-based stability, organizing all artifacts along the way. Run end-to-end with a single command or drive individual stages for advanced control.
+## Why ADAMS?
 
-### Why Agent-Driven?
+Traditional computational workflows often suffer from "human-in-the-loop" bottlenecks and error-prone manual transitions. ADAMS replaces these with:
 
-Traditional molecular docking requires:
-- Manual file preparation and format conversion
-- Complex command-line interfaces
-- Expert knowledge of tools like AutoDock Vina, GROMACS
-- Manual analysis of hundreds of output files
-
-**With ADAMS:**
-- Natural language instructions
-- Autonomous agents handle the complexity
-- End-to-end pipeline: docking → MD simulation → analysis
-- Automatic file organization and result interpretation
+- **Natural Language Orchestration**: Interact with your simulation environment using scientific intent (e.g., _"Find the most stable binding site for these ligands on kinase X"_).
+- **Autonomous Decision Making**: Intelligent agents determine optimal grid spacing, cluster parameters, and MD candidate selection.
+- **End-to-End Traceability**: Every decision, Tool execution, and file transition is logged, providing a complete audit trail for your research.
 
 ---
 
 ## Quick Start
 
-### Installation (one-time setup)
+### Installation
 
-**Prerequisites:**
-
-Conda or Mamba package manager ([installation guide](https://docs.conda.io/en/latest/miniconda.html))
-
-Set up your OpenAI API key. (You can also provide it during a session; if you choose to store it locally, ADAMS will warn you first.)
+**Prerequisites:** Conda or Mamba package manager and an OpenAI API key.
 
 ```bash
-# set it as an environment variable
-export OPENAI_API_KEY="your-api-key-here"
-```
-
-**Quick Install (One Command):**
-
-```bash
+# Set up your environment (recommended)
 curl -fsSL https://raw.githubusercontent.com/Applied-Scientific/ADAMS/main/scripts/install.sh | bash
 ```
 
-**Install (Download and Inspect First - Recommended):**
-
 ```bash
-# Download the installer
-curl -fsSL https://raw.githubusercontent.com/Applied-Scientific/ADAMS/main/scripts/install.sh -o install.sh
-
-# Inspect it (optional but recommended)
-less install.sh
-
-# Run it
-bash install.sh
-```
-
-**Install from Cloned Repository:**
-
-```bash
-git clone https://github.com/Applied-Scientific/ADAMS.git
-cd ADAMS
+# Install ADAMS
 bash scripts/install.sh
 ```
 
-The installer will:
-- Create a conda environment named `adams` with Python 3.12
-- Install all required dependencies (rdkit, openbabel, openmm, AmberTools, GROMACS)
-- Install the adams package
-- Verify the installation
+For detailed setup instructions, GPU configuration, and troubleshooting, see [TMI.md](TMI.md).
 
-For manual installation or troubleshooting, see the [detailed installation guide in TMI.md](TMI.md#installation-steps).
+### API key
+
+Set your API key before or when starting ADAMS:
+
+- **Environment variable (recommended):** Export the key for your provider, e.g. `export OPENAI_API_KEY="your-key"` (or `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` for other models). ADAMS will use it automatically.
+- **In the UI:** If no key is set, ADAMS will prompt you to enter it when you open the Agent chat. You can optionally save it to the system keychain for future runs.
+
+See [TMI.md](TMI.md) for keychain storage and security notes.
 
 ### Run Your Analysis
+
+Start the interactive TUI (default: new session):
 
 ```bash
 adams
 ```
 
-**That's it.** The agents will discover binding pockets on your protein, dock ligands to the best sites, run molecular dynamics simulations, and generate analysis reports. **All from a single natural language instruction.**
+Use `adams -h` or `adams --help` to list all options. To resume a previous session by ID (e.g. `YYYYMMDD_HHMMSS` or `tui_...`):
 
----
+```bash
+adams --continue-session SESSION_ID
+```
 
-## Installation & Requirements
+**ADAMS memory commands**:
 
-### System Requirements
+- `adams instructions get` — print custom instructions
+- `adams instructions set` / `append` — set or append custom instructions (text, `--file`, or stdin)
+- `adams instructions clear` — clear custom instructions
+- `adams preferences clear` — clear stored preferences (GPU, working directory, learned behaviors)
 
-- Linux or macOS
-- Conda/Mamba package manager
-- OpenAI API key (required for agent functionality)
-- (Optional) NVIDIA GPU for accelerated docking and MD simulations
-
-### Detailed Installation
-
-For most users, the Quick Start installation scripts are sufficient. For advanced setups, GPU configuration, or troubleshooting, see the [detailed installation guide in TMI.md](TMI.md#installation-steps).
-
----
-
-## Security & Execution Notes
-
-- **Local key storage**: ADAMS can optionally store your OpenAI API key in `~/.adams`. If you opt in, it is stored in **plaintext** and ADAMS will attempt to set file permissions to `600` (user read/write only).
-- **Agent-driven code and tool execution is allowed**: ADAMS is designed to run external scientific tools (e.g., docking/MD executables) and may run user/agent-provided Python snippets for data preprocessing in a controlled environment. Only use ADAMS with **trusted inputs** and on machines where this is acceptable.
-- **Traces and logs may contain sensitive data**: ADAMS can write traces/logs under `agent_data/` that may include prompts, file paths, and outputs. Treat these files as sensitive.
+The agents will guide you through pocket discovery, production docking, and MD-based stability analysis.
 
 ---
 
 ## Documentation
 
-- **[TMI.md](TMI.md)** - Detailed technical documentation covering installation, file organization, pipeline architecture, and known limitations
-- **[docs/AGENTS_DOCUMENTATION.md](docs/AGENTS_DOCUMENTATION.md)** - Complete agent architecture, tools, and agent-to-agent interactions
-- **[docs/WORKFLOW_EXECUTION.md](docs/WORKFLOW_EXECUTION.md)** - Detailed workflow execution order, file paths, and output organization
-- **[docs/TERMINOLOGY_QUICK_REF.md](docs/TERMINOLOGY_QUICK_REF.md)** - Standard terminology and vocabulary reference
+- **[TMI.md](TMI.md)** - Detailed technical documentation on installation, file organization, and pipeline architecture.
+- **[docs/AGENTS_DOCUMENTATION.md](docs/AGENTS_DOCUMENTATION.md)** - Deep dive into agent roles (Controller, Preprocessing, Docking, MD).
+- **[docs/WORKFLOW_EXECUTION.md](docs/WORKFLOW_EXECUTION.md)** - Execution sequences and file path specifications.
+- **[docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md)** - Version-level docking and preprocessing changes.
 
 ---
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request.
-
 ## Citation
 
-If you use ADAMS in your research, please cite:
+If ADAMS assists in your research, please cite our work:
 
 ```bibtex
 @software{adams2025,
@@ -141,14 +119,4 @@ If you use ADAMS in your research, please cite:
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
-
----
-
-## NOTICE
-
-This project redistributes Vina-GPU 2.1 binaries/kernels for GPU docking, obtained from the upstream repository and distributed under Apache License 2.0: [DeltaGroupNJUPT/Vina-GPU-2.1](https://github.com/DeltaGroupNJUPT/Vina-GPU-2.1). See [NOTICE](NOTICE).
-
----
-
-**Questions?** Check the [technical documentation](TMI.md) or [open an issue](https://github.com/Applied-Scientific/ADAMS/issues).
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

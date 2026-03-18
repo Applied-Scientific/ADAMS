@@ -20,6 +20,7 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors
 
 from ...logger_utils import get_logger
+from ..charge_model import validate_charge_model
 
 
 class UnsupportedFormatError(Exception):
@@ -42,13 +43,32 @@ def _is_3d(mol):
         conf = mol.GetConformer()
         if not conf.Is3D():
             return False
-        # Double check z-coords are not all zero (common in 2D SDFs)
         pos = conf.GetPositions()
         if np.all(np.abs(pos[:, 2]) < 1e-3):
             return False
         return True
-    except:
+    except Exception:
         return False
+
+
+def _mol_to_pdbqt(mol, mol_id: str, pdbqt_dir: str, ligprep) -> tuple:
+    """Convert one 3D mol to PDBQT. Returns (abspath, None) on success or (None, error_msg)."""
+    from meeko import PDBQTWriterLegacy
+    from rdkit.Chem import AddHs
+
+    clean_id = "".join(c if c.isalnum() else "_" for c in mol_id)
+    mol = AddHs(mol, addCoords=True)
+    try:
+        mol_setups = ligprep.prepare(mol)
+        pdbqt_string, is_ok, error_msg = PDBQTWriterLegacy.write_string(mol_setups[0])
+        if not is_ok:
+            return (None, error_msg)
+        path = os.path.join(pdbqt_dir, f"{clean_id}.pdbqt")
+        with open(path, "w") as f:
+            f.write(pdbqt_string)
+        return (os.path.abspath(path), None)
+    except Exception as e:
+        return (None, str(e))
 
 
 def detect_ligand_format(input_file: str) -> dict:
@@ -158,37 +178,39 @@ def detect_ligand_format(input_file: str) -> dict:
     }
 
 
-def convert_3d_to_pdbqt(input_file: str, output_dir: str) -> list:
+def convert_3d_to_pdbqt(
+    input_file: str, output_dir: str, charge_model: str = "gasteiger"
+) -> str:
     """
-    Converts 3D structure files directly to PDBQT format.
+    Converts 3D structure files directly to PDBQT format and writes a mapping CSV.
 
     Args:
         input_file: Path to 3D structure file (SDF, MOL2, PDB, PDBQT)
-        output_dir: Directory to save PDBQT files
+        output_dir: Directory to save PDBQT files and docking_ready_ligands.csv
+        charge_model: Meeko partial charge model (default "gasteiger"). Must match receptor.
 
     Returns:
-        list: Paths to generated PDBQT files
+        str: Path to the mapping CSV (ID, PDBQT_File). Pass this as input_data to docking.
 
     Raises:
         Invalid3DStructureError: If coordinates are not valid 3D
         UnsupportedFormatError: If conversion fails
     """
-    from meeko import MoleculePreparation, PDBQTWriterLegacy
-    from rdkit.Chem import AddHs
+    from meeko import MoleculePreparation
 
     logger = get_logger()
+    charge_model = validate_charge_model(charge_model)
     logger.info(f"Converting 3D structures to PDBQT from: {input_file}")
 
     if not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file not found: {input_file}")
 
-    # Create output directory
     pdbqt_dir = os.path.join(output_dir, "pdbqt_files")
     os.makedirs(pdbqt_dir, exist_ok=True)
 
     ext = os.path.splitext(input_file)[1].lower()
-    pdbqt_paths = []
-    ligprep = MoleculePreparation()
+    mapping_rows = []  # list of {"ID": mol_id, "PDBQT_File": path}
+    ligprep = MoleculePreparation(charge_model=charge_model)
 
     # Handle different 3D file formats
     if ext in [".sdf", ".sd"]:
@@ -197,146 +219,88 @@ def convert_3d_to_pdbqt(input_file: str, output_dir: str) -> list:
             if not mol:
                 logger.warning(f"Failed to read molecule {i} from SDF")
                 continue
-
-            # Validate 3D coordinates
             if not _is_3d(mol):
                 raise Invalid3DStructureError(
                     f"Molecule {i} does not have valid 3D coordinates. "
                     "Use standardize_2d_to_csv() for 2D structures."
                 )
-
-            # Get molecule ID
-            if mol.HasProp("_Name") and mol.GetProp("_Name").strip():
-                mol_id = mol.GetProp("_Name")
-            elif mol.HasProp("ID"):
-                mol_id = mol.GetProp("ID")
-            else:
-                mol_id = f"lig_{i+1}"
-
-            clean_id = "".join([c if c.isalnum() else "_" for c in mol_id])
-
-            # Add hydrogens if not present
-            mol = AddHs(mol, addCoords=True)
-
-            # Convert to PDBQT using Meeko
-            try:
-                mol_setups = ligprep.prepare(mol)
-                pdbqt_string, is_ok, error_msg = PDBQTWriterLegacy.write_string(
-                    mol_setups[0]
+            mol_id = (
+                mol.GetProp("_Name").strip()
+                if mol.HasProp("_Name") and mol.GetProp("_Name").strip()
+                else mol.GetProp("ID") if mol.HasProp("ID") else f"lig_{i+1}"
+            )
+            path, err = _mol_to_pdbqt(mol, mol_id, pdbqt_dir, ligprep)
+            if path:
+                mapping_rows.append(
+                    {"ID": mol_id, "PDBQT_File": path, "Charge_Model": charge_model}
                 )
-
-                if is_ok:
-                    pdbqt_path = os.path.join(pdbqt_dir, f"{clean_id}.pdbqt")
-                    with open(pdbqt_path, "w") as f:
-                        f.write(pdbqt_string)
-                    pdbqt_paths.append(os.path.abspath(pdbqt_path))
-                    logger.info(f"Converted {mol_id} to PDBQT")
-                else:
-                    logger.warning(f"Failed to convert {mol_id} to PDBQT: {error_msg}")
-            except Exception as e:
-                logger.warning(f"Error converting {mol_id} to PDBQT: {e}")
+                logger.info(f"Converted {mol_id} to PDBQT")
+            elif err:
+                logger.warning(f"Failed to convert {mol_id} to PDBQT: {err}")
 
     elif ext == ".mol2":
-        # Split multi-mol2 files
         try:
             with open(input_file, "r") as f:
                 content = f.read()
             blocks = content.split("@<TRIPOS>MOLECULE")
             if not blocks[0].strip():
                 blocks = blocks[1:]
-
             for i, block in enumerate(blocks):
                 block = "@<TRIPOS>MOLECULE" + block
                 mol = Chem.MolFromMol2Block(block, sanitize=False, removeHs=False)
-
                 if not mol:
                     logger.warning(f"Failed to parse MOL2 block {i}")
                     continue
-
-                # Get molecule ID from MOL2 name line
                 lines = block.splitlines()
-                if len(lines) > 1 and lines[1].strip():
-                    mol_id = lines[1].strip()
-                else:
-                    mol_id = f"lig_{i+1}"
-
-                clean_id = "".join([c if c.isalnum() else "_" for c in mol_id])
-
-                # Add hydrogens
-                mol = AddHs(mol, addCoords=True)
-
-                # Convert to PDBQT
-                try:
-                    mol_setups = ligprep.prepare(mol)
-                    pdbqt_string, is_ok, error_msg = PDBQTWriterLegacy.write_string(
-                        mol_setups[0]
+                mol_id = lines[1].strip() if len(lines) > 1 and lines[1].strip() else f"lig_{i+1}"
+                path, err = _mol_to_pdbqt(mol, mol_id, pdbqt_dir, ligprep)
+                if path:
+                    mapping_rows.append(
+                        {"ID": mol_id, "PDBQT_File": path, "Charge_Model": charge_model}
                     )
-
-                    if is_ok:
-                        pdbqt_path = os.path.join(pdbqt_dir, f"{clean_id}.pdbqt")
-                        with open(pdbqt_path, "w") as f:
-                            f.write(pdbqt_string)
-                        pdbqt_paths.append(os.path.abspath(pdbqt_path))
-                        logger.info(f"Converted {mol_id} to PDBQT")
-                    else:
-                        logger.warning(
-                            f"Failed to convert {mol_id} to PDBQT: {error_msg}"
-                        )
-                except Exception as e:
-                    logger.warning(f"Error converting {mol_id} to PDBQT: {e}")
-
+                    logger.info(f"Converted {mol_id} to PDBQT")
+                elif err:
+                    logger.warning(f"Failed to convert {mol_id} to PDBQT: {err}")
         except Exception as e:
             raise UnsupportedFormatError(f"Failed to process MOL2 file: {e}")
 
     elif ext == ".pdb":
-        # Single PDB file
         mol = Chem.MolFromPDBFile(input_file, removeHs=False)
         if not mol:
             raise UnsupportedFormatError(f"Failed to read PDB file: {input_file}")
-
         mol_id = os.path.basename(input_file).split(".")[0]
-        clean_id = "".join([c if c.isalnum() else "_" for c in mol_id])
-
-        # Add hydrogens
-        mol = AddHs(mol, addCoords=True)
-
-        # Convert to PDBQT
-        try:
-            mol_setups = ligprep.prepare(mol)
-            pdbqt_string, is_ok, error_msg = PDBQTWriterLegacy.write_string(
-                mol_setups[0]
+        path, err = _mol_to_pdbqt(mol, mol_id, pdbqt_dir, ligprep)
+        if path:
+            mapping_rows.append(
+                {"ID": mol_id, "PDBQT_File": path, "Charge_Model": charge_model}
             )
-
-            if is_ok:
-                pdbqt_path = os.path.join(pdbqt_dir, f"{clean_id}.pdbqt")
-                with open(pdbqt_path, "w") as f:
-                    f.write(pdbqt_string)
-                pdbqt_paths.append(os.path.abspath(pdbqt_path))
-                logger.info(f"Converted {mol_id} to PDBQT")
-            else:
-                raise UnsupportedFormatError(f"Failed to convert to PDBQT: {error_msg}")
-        except Exception as e:
-            raise UnsupportedFormatError(f"Error converting to PDBQT: {e}")
+            logger.info(f"Converted {mol_id} to PDBQT")
+        else:
+            raise UnsupportedFormatError(f"Failed to convert to PDBQT: {err or 'unknown'}")
 
     elif ext == ".pdbqt":
-        # Already PDBQT, just copy it
         mol_id = os.path.basename(input_file).split(".")[0]
         clean_id = "".join([c if c.isalnum() else "_" for c in mol_id])
         pdbqt_path = os.path.join(pdbqt_dir, f"{clean_id}.pdbqt")
         shutil.copy(input_file, pdbqt_path)
-        pdbqt_paths.append(os.path.abspath(pdbqt_path))
+        path = os.path.abspath(pdbqt_path)
+        mapping_rows.append(
+            {"ID": mol_id, "PDBQT_File": path, "Charge_Model": charge_model}
+        )
         logger.info(f"Copied PDBQT file: {mol_id}")
 
     else:
         raise UnsupportedFormatError(f"Cannot convert {ext} to PDBQT as 3D structure")
 
-    if not pdbqt_paths:
+    if not mapping_rows:
         raise Invalid3DStructureError(
             "No valid 3D structures could be converted to PDBQT"
         )
 
-    logger.info(f"Successfully converted {len(pdbqt_paths)} structures to PDBQT")
-    return pdbqt_paths
+    mapping_csv = os.path.join(output_dir, "docking_ready_ligands.csv")
+    pd.DataFrame(mapping_rows).to_csv(mapping_csv, index=False)
+    logger.info(f"Successfully converted {len(mapping_rows)} structures to PDBQT -> {mapping_csv}")
+    return mapping_csv
 
 
 def standardize_2d_to_csv(
@@ -378,7 +342,7 @@ def standardize_2d_to_csv(
     if ext in [".csv", ".txt", ".tsv"]:
         try:
             df = pd.read_csv(input_file, sep=None, engine="python")
-        except:
+        except Exception:
             df = pd.read_csv(input_file)
 
         # Column mapping (case-insensitive)
@@ -419,7 +383,7 @@ def standardize_2d_to_csv(
                         mol = Chem.MolFromSmiles(smi)
                         if mol:
                             mw = Descriptors.MolWt(mol)
-                    except:
+                    except Exception:
                         pass
 
                 records.append({"ID": lid, "SMILES": smi, "MolWt": mw})
@@ -436,7 +400,7 @@ def standardize_2d_to_csv(
                         mol = Chem.MolFromSmiles(smi)
                         if mol:
                             mw = Descriptors.MolWt(mol)
-                    except:
+                    except Exception:
                         pass
 
                     records.append({"ID": lid, "SMILES": smi, "MolWt": mw})
@@ -469,7 +433,7 @@ def standardize_2d_to_csv(
                     mol = Chem.MolFromSmiles(smi)
                     if mol:
                         mw = Descriptors.MolWt(mol)
-                except:
+                except Exception:
                     pass
 
                 records.append({"ID": lid, "SMILES": smi, "MolWt": mw})
@@ -515,107 +479,6 @@ def standardize_2d_to_csv(
 
     logger.info(f"Standardized {len(records)} ligands to CSV: {output_csv}")
     return output_csv
-
-
-def generate_conformers_to_pdbqt(input_csv: str, output_dir: str) -> list:
-    """
-    Generates 3D conformers from SMILES CSV and converts to PDBQT.
-
-    Args:
-        input_csv: Path to CSV with SMILES column (from standardize_2d_to_csv)
-        output_dir: Directory to save PDBQT files
-
-    Returns:
-        list: Paths to generated PDBQT files
-
-    Raises:
-        FileNotFoundError: If input CSV doesn't exist
-        ValueError: If CSV doesn't have SMILES column
-    """
-    from meeko import MoleculePreparation, PDBQTWriterLegacy
-    from rdkit.Chem import AddHs, MolFromSmiles
-    from rdkit.Chem.AllChem import EmbedMolecule, UFFOptimizeMolecule
-
-    logger = get_logger()
-    logger.info(f"Generating 3D conformers from CSV: {input_csv}")
-
-    if not os.path.exists(input_csv):
-        raise FileNotFoundError(f"Input CSV not found: {input_csv}")
-
-    # Read CSV
-    df = pd.read_csv(input_csv)
-
-    if "SMILES" not in df.columns:
-        raise ValueError(
-            f"Input CSV must have 'SMILES' column. Found columns: {list(df.columns)}"
-        )
-
-    if "ID" not in df.columns:
-        raise ValueError(
-            f"Input CSV must have 'ID' column. Found columns: {list(df.columns)}"
-        )
-
-    # Create output directory
-    pdbqt_dir = os.path.join(output_dir, "pdbqt_files")
-    os.makedirs(pdbqt_dir, exist_ok=True)
-
-    pdbqt_paths = []
-    ligprep = MoleculePreparation()
-
-    logger.info(f"Processing {len(df)} ligands...")
-
-    for idx, row in df.iterrows():
-        smiles = row["SMILES"]
-        lig_id = str(row["ID"])
-
-        # Generate 3D conformer
-        try:
-            mol = MolFromSmiles(smiles)
-            if not mol:
-                logger.warning(f"Failed to parse SMILES for {lig_id}: {smiles}")
-                continue
-
-            # Add hydrogens
-            mol = AddHs(mol)
-
-            # Generate 3D coordinates
-            result = EmbedMolecule(mol, randomSeed=42)
-            if result == -1:
-                logger.warning(f"Failed to embed molecule {lig_id}")
-                continue
-
-            # Optimize geometry
-            try:
-                UFFOptimizeMolecule(mol)
-            except:
-                # UFF optimization can fail, but we can still proceed
-                logger.warning(
-                    f"UFF optimization failed for {lig_id}, using unoptimized conformer"
-                )
-
-            # Convert to PDBQT using Meeko
-            mol_setups = ligprep.prepare(mol)
-            pdbqt_string, is_ok, error_msg = PDBQTWriterLegacy.write_string(
-                mol_setups[0]
-            )
-
-            if is_ok:
-                clean_id = "".join([c if c.isalnum() else "_" for c in lig_id])
-                pdbqt_path = os.path.join(pdbqt_dir, f"{clean_id}.pdbqt")
-
-                with open(pdbqt_path, "w") as f:
-                    f.write(pdbqt_string)
-
-                pdbqt_paths.append(os.path.abspath(pdbqt_path))
-            else:
-                logger.warning(f"PDBQT conversion failed for {lig_id}: {error_msg}")
-
-        except Exception as e:
-            logger.warning(f"Error processing {lig_id}: {e}")
-            continue
-
-    logger.info(f"Generated {len(pdbqt_paths)} PDBQT files from {len(df)} SMILES")
-    return pdbqt_paths
 
 
 def standardize_ligand_data(
@@ -717,12 +580,11 @@ def standardize_ligand_data(
 
                 if mol:
                     mw = Descriptors.MolWt(mol)
-                    # Assume Mol2 is 3D (it usually is)
                     found_3d = True
                     out_path = os.path.join(structures_dir, f"{clean_id}.mol2")
                     with open(out_path, "w") as out_f:
                         out_f.write(block)
-
+                    records.append({"ID": lid, "SMILES": os.path.abspath(out_path), "MolWt": mw})
                 else:
                     logger.warning(f"Failed to parse Mol2 block {i}")
 
@@ -751,60 +613,62 @@ def standardize_ligand_data(
 
             if mol:
                 mw = Descriptors.MolWt(mol)
-        except:
+        except Exception:
             pass
 
         records.append({"ID": lid, "SMILES": os.path.abspath(out_path), "MolWt": mw})
 
     # --- CSV / SMILES (2D) ---
-    elif ext in [".csv", ".txt", ".tsv", ".smi", ".smiles"]:
-        # ... (Reuse CSV/SMILES logic from previous thought) ...
-        # These are strictly 2D sources
-        pass  # Will implement below to keep file clean
-
-        if ext in [".csv", ".txt", ".tsv"]:
-            try:
-                df = pd.read_csv(input_file, sep=None, engine="python")
-            except:
-                df = pd.read_csv(input_file)
-
-            # Column mapping
-            cols = {c.lower(): c for c in df.columns}
-
-            # Find ID
-            tgt_id = None
-            for k in cols:
-                if k in ["id", "name", "identifier", id_col.lower()]:
-                    tgt_id = cols[k]
-                    break
-
-            # Find SMILES
-            tgt_smi = None
-            for k in cols:
-                if k in ["smiles", "smi", "canonical_smiles", smiles_col.lower()]:
-                    tgt_smi = cols[k]
-                    break
-
-            if tgt_smi:
+    elif ext in [".csv", ".txt", ".tsv"]:
+        try:
+            df = pd.read_csv(input_file, sep=None, engine="python")
+        except Exception:
+            df = pd.read_csv(input_file)
+        cols = {c.lower(): c for c in df.columns}
+        tgt_id = next((cols[k] for k in cols if k in ["id", "name", "identifier", id_col.lower()]), None)
+        tgt_smi = next((cols[k] for k in cols if k in ["smiles", "smi", "canonical_smiles", smiles_col.lower()]), None)
+        if tgt_smi:
+            for i, row in df.iterrows():
+                smi = str(row[tgt_smi]).strip()
+                lid = str(row[tgt_id]) if tgt_id else f"lig_{i+1}"
+                mw = 0
+                try:
+                    mol = Chem.MolFromSmiles(smi)
+                    if mol:
+                        mw = Descriptors.MolWt(mol)
+                except Exception:
+                    pass
+                records.append({"ID": lid, "SMILES": smi, "MolWt": mw})
+        else:
+            first = str(df.iloc[0, 0]).strip()
+            if Chem.MolFromSmiles(first):
                 for i, row in df.iterrows():
-                    smi = row[tgt_smi]
-                    lid = row[tgt_id] if tgt_id else f"lig_{i+1}"
-                    mw = 0
-                    try:
-                        mol = Chem.MolFromSmiles(str(smi))
-                        if mol:
-                            mw = Descriptors.MolWt(mol)
-                    except:
-                        pass
-                    records.append({"ID": str(lid), "SMILES": str(smi), "MolWt": mw})
+                    smi = str(row.iloc[0]).strip()
+                    lid = str(row.iloc[1]) if len(row) > 1 else f"lig_{i+1}"
+                    records.append({"ID": lid, "SMILES": smi, "MolWt": 0})
             else:
-                # Headerless assumption check
-                first = str(df.iloc[0, 0])
-                if Chem.MolFromSmiles(first):
-                    for i, row in df.iterrows():
-                        smi = row[0]
-                        lid = row[1] if len(row) > 1 else f"lig_{i+1}"
-                        records.append({"ID": str(lid), "SMILES": str(smi), "MolWt": 0})
+                raise UnsupportedFormatError(f"Could not find SMILES column. Available: {list(df.columns)}")
+
+    elif ext in [".smi", ".smiles"]:
+        with open(input_file, "r") as f:
+            for i, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                smi = parts[0]
+                lid = parts[1] if len(parts) >= 2 else f"lig_{i+1}"
+                mw = 0
+                try:
+                    mol = Chem.MolFromSmiles(smi)
+                    if mol:
+                        mw = Descriptors.MolWt(mol)
+                except Exception:
+                    pass
+                records.append({"ID": lid, "SMILES": smi, "MolWt": mw})
+
+    else:
+        raise UnsupportedFormatError(f"Cannot process {ext} as ligand input.")
 
     # --- Write Output ---
     if not records:

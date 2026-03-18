@@ -6,32 +6,35 @@ This document describes how file paths flow between pipeline agents. After each 
 ## Preprocessing → Docking Mapping
 
 ### Receptor File Path
-**Source**: `preprocessing_agent.run_clean_pdb()` output
-- **Returns**: String path to cleaned PDB file
-- **Location**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_clean_h.pdb`
-- **Example**: `/path/to/output/preprocessing/receptors/protein_A_clean_h.pdb`
+**Source**: `preprocessing_agent.run_protonate_receptor()` output (MANDATORY after `run_clean_pdb`)
+- **Returns**: Dictionary with `'protonated_pdb'` key containing path to protonated PDB file
+- **Location**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_protonated.pdb`
+- **Example**: `/path/to/output/preprocessing/receptors/protein_A_protonated.pdb`
+- **Workflow**: `run_clean_pdb()` → `run_protonate_receptor()` → docking/MD
+  - `run_clean_pdb()` outputs: `{prefix}_{chain}_clean.pdb` (no hydrogens)
+  - `run_protonate_receptor()` outputs: `{prefix}_{chain}_protonated.pdb` (with pKa-based hydrogens)
 
 **Target**: `docking_agent` input
 - **Parameter**: `receptor` (str)
-- **Mapping**: Use the EXACT string returned from `run_clean_pdb()`
-- **Note**: Docking agent can convert PDB to PDBQT automatically if needed
+- **Mapping**: Use the `'protonated_pdb'` path from `run_protonate_receptor()` output
+- **Note**: Docking agent can convert PDB to PDBQT automatically if needed (protonate=False by default, expects pre-protonated file)
 
 ### Ligand Data Path
 **Source**: `preprocessing_agent.run_standardize_ligand_data()` output
 - **Returns**: Dictionary with keys:
   - `'format_type'`: '2d' or '3d' indicating input format
-  - `'output_path'`: Path to output (CSV for 2D, list of PDBQT paths for 3D)
+  - `'output_path'`: Path to output (CSV for 2D, path to mapping CSV for 3D)
   - `'num_molecules'`: Number of molecules processed
   - `'message'`: Status message
 
-**2D Pathway (SMILES)**: Requires additional conformer generation
+**2D Pathway (SMILES)**: Conformer generation is preprocessing-only
 - run_standardize_ligand_data → CSV with SMILES
-- run_generate_conformers_to_pdbqt → List of PDBQT file paths
-- Create CSV mapping with columns: ID, PDBQT_File
+- run_smiles_to_pdbqt → **path to mapping CSV** (docking_ready_ligands.csv with ID, PDBQT_File, optionally Variant_ID, Conformer_Index). Uses row-unique filenames (Variant_ID when present, else ID) so enumerated microstates get distinct PDBQT files.
+- Pass that mapping CSV path to docking as input_data
 
-**3D Pathway (SDF/MOL2/PDB)**: Direct to PDBQT
-- run_standardize_ligand_data → List of PDBQT file paths
-- Create CSV mapping with columns: ID, PDBQT_File
+**3D Pathway (SDF/MOL2/PDB)**: Direct to PDBQT and mapping CSV
+- run_standardize_ligand_data → **path to mapping CSV** (docking_ready_ligands.csv with ID, PDBQT_File). PDBQT files written to {output_dir}/pdbqt_files/
+- Pass that mapping CSV path to docking as input_data
 
 **Target**: `docking_agent` input
 - **Parameters**: `input_data` (str - path to CSV file)
@@ -39,7 +42,7 @@ This document describes how file paths flow between pipeline agents. After each 
   - `ID`: Ligand identifier
   - `PDBQT_File`: Absolute path to PDBQT file
 - **CRITICAL**: All ligands MUST be pre-prepared as PDBQT files before docking
-- **Location**: PDBQT files in `{outpath}/preprocessing/ligands/conformers_pdbqt/` or `3d_structures_pdbqt/`
+- **Location**: PDBQT files in `{output_dir}/pdbqt_files/`; mapping CSV at `{output_dir}/docking_ready_ligands.csv` (2D and 3D).
 
 **Example**:
 ```python
@@ -49,35 +52,36 @@ This document describes how file paths flow between pipeline agents. After each 
     'output_path': '/output/preprocessing/ligands/cleaned_data.csv',  # Contains SMILES
     'num_molecules': 100
 }
-# Then: run_generate_conformers_to_pdbqt(csv_path, output_dir)
-# Returns: ['/output/preprocessing/ligands/conformers_pdbqt/lig_0.pdbqt', ...]
-# Create mapping CSV with ID and PDBQT_File columns
+# Then: mapping_csv = run_smiles_to_pdbqt(csv_path, output_dir)
+# Returns: path to docking_ready_ligands.csv (ID, PDBQT_File, ...)
+# Use mapping_csv as input_data for docking
 
 # 3D pathway output
 {
     'format_type': '3d',
-    'output_path': ['/output/preprocessing/ligands/3d_structures_pdbqt/mol_0.pdbqt', ...],
+    'output_path': '/output/docking_ready_ligands.csv',  # mapping CSV (ID, PDBQT_File)
     'num_molecules': 50
 }
-# Create mapping CSV with ID and PDBQT_File columns
+# Use output_path as input_data for docking
 
 # Docking input (must have these columns)
 # CSV format:
 # ID,PDBQT_File
-# lig_0,/absolute/path/to/conformers_pdbqt/lig_0.pdbqt
-# lig_1,/absolute/path/to/conformers_pdbqt/lig_1.pdbqt
+# lig_0,/absolute/path/to/pdbqt_files/lig_0.pdbqt
+# lig_1,/absolute/path/to/pdbqt_files/lig_1.pdbqt
 input_data = '/output/preprocessing/ligands/ligands_with_pdbqt_paths.csv'
 ```
 
 ## Docking → MD Mapping
 
 ### Receptor File Path
-**Source**: Same as preprocessing output (cleaned receptor)
-- **Path**: `{out_folder}/preprocessing/receptors/{protein_name}_{chain}_clean_h.pdb`
+**Source**: Same as preprocessing output (protonated receptor)
+- **Path**: `{out_folder}/preprocessing/receptors/{protein_name}_{chain}_protonated.pdb`
+- **Note**: Must be protonated (from `run_protonate_receptor()`), not just cleaned
 
 **Target**: `md_agent` input
 - **Parameter**: `protein_file` (for ProteinTopologyConfig)
-- **Mapping**: Use the same cleaned receptor path from preprocessing
+- **Mapping**: Use the protonated receptor path from preprocessing (`run_protonate_receptor()` output)
 
 ### Docking Results Folder
 **Source**: Docking agent output
@@ -118,8 +122,8 @@ input_data = '/output/preprocessing/ligands/ligands_with_pdbqt_paths.csv'
 - **Location**: `{md_workdir}/md_analysis/protein/protein.gro`, `topol.top`
 
 **Target**: LigPrepareConfig input (for mid-pipeline start)
-- **Parameters**: `protein_gro`, `protein_top`
-- **Mapping**: Use exact paths from protein topology step
+- **Parameters**: `protein_gro`, `protein_top`, `water_model` (optional but recommended)
+- **Mapping**: Use exact paths from protein topology step. Set `water_model` (e.g. `tip3p`, `spc`) to match the topology so solvation uses the same water model.
 
 ### Pose Directories
 **Source**: LigPrepareConfig output

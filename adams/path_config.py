@@ -28,6 +28,11 @@ _agent_data_path: ContextVar[Optional[Path]] = ContextVar(
     "agent_data_path", default=None
 )
 
+# Current run's session ID (set when tracing starts; used by workflow wrapper for plan linking)
+_current_session_id: ContextVar[Optional[str]] = ContextVar(
+    "current_session_id", default=None
+)
+
 
 def validate_path_safety(target_path: Path, base_path: Optional[Path] = None) -> None:
     """
@@ -39,22 +44,6 @@ def validate_path_safety(target_path: Path, base_path: Optional[Path] = None) ->
 
     Raises:
         PermissionError: If the target_path is outside the base_path
-
-    Examples:
-        Validating a path inside the allowed base directory:
-
-            >>> from pathlib import Path
-            >>> base = Path("/safe/root")
-            >>> validate_path_safety(base / "subdir/file.txt", base)  # no exception
-
-        Preventing a path traversal attack (escaping the base directory):
-
-            >>> from pathlib import Path
-            >>> base = Path("/safe/root")
-            >>> validate_path_safety(base / "../secret.txt", base)
-            Traceback (most recent call last):
-                ...
-            PermissionError: Access denied: Path '...
     """
     if base_path is None:
         base_path = Path.cwd()
@@ -82,30 +71,6 @@ def get_safe_path(user_path: str, base_path: Optional[Path] = None) -> Path:
 
     Raises:
         PermissionError: If the resolved path is outside base_path
-
-    Examples:
-        Basic usage with a relative path (resolved against the base path)::
-
-            >>> from pathlib import Path
-            >>> base = Path("/data/project")
-            >>> get_safe_path("inputs/file.txt", base_path=base)
-            PosixPath('/data/project/inputs/file.txt')
-
-        Absolute path inside the allowed base directory is accepted::
-
-            >>> from pathlib import Path
-            >>> base = Path("/data/project")
-            >>> get_safe_path("/data/project/inputs/file.txt", base_path=base)
-            PosixPath('/data/project/inputs/file.txt')
-
-        Absolute path outside the allowed base directory raises PermissionError::
-
-            >>> from pathlib import Path
-            >>> base = Path("/data/project")
-            >>> get_safe_path("/etc/passwd", base_path=base)
-            Traceback (most recent call last):
-            ...
-            PermissionError: Access denied: Path '/etc/passwd' resolves to ...
     """
     if base_path is None:
         base_path = Path.cwd()
@@ -225,6 +190,21 @@ def resolve_path_from_input(
         return Path.cwd() / "agent_data"
 
 
+def set_current_session_id(session_id: Optional[str]) -> None:
+    """Set the current run's session ID (from the trace processor).
+
+    Called by setup_tracing() when a session starts. The workflow wrapper uses
+    this for linking plan_paths to the session, so we don't rely on the agent
+    to pass the correct session_id.
+    """
+    _current_session_id.set(session_id)
+
+
+def get_current_session_id() -> Optional[str]:
+    """Return the current run's session ID if set (e.g. by setup_tracing)."""
+    return _current_session_id.get()
+
+
 def reset_paths() -> None:
     """Reset the path configuration.
 
@@ -239,3 +219,4 @@ def reset_paths() -> None:
         >>> set_agent_data_path("/new/path")  # Must set path again
     """
     _agent_data_path.set(None)
+    _current_session_id.set(None)

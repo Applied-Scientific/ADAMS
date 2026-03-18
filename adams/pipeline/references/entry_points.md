@@ -12,17 +12,23 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 - ligand_input (SMILES CSV, SDF, MOL2, PDB, or PDBQT files)
 
 **What It Does** (two independent operations that can be run in any order):
-- Receptor Preparation: Cleans receptor PDB (removes unwanted chains, water, adds hydrogens)
+- Receptor Preparation: Cleans receptor PDB (removes unwanted chains, water, adds missing atoms) → Protonates using PDB2PQR+PROPKA (pKa-based protonation)
 - Ligand Preparation:
   - Detects input format (2D vs 3D)
-  - 2D pathway (SMILES): standardize → generate conformers → convert to PDBQT
+  - 2D pathway (SMILES): standardize → (optional ligand_preprocessing) → run_smiles_to_pdbqt → mapping CSV (docking_ready_ligands.csv)
   - 3D pathway (SDF/MOL2/PDB): validate 3D coords → convert to PDBQT
-  - Creates CSV mapping with ID and PDBQT_File columns
+  - Conformer generation is preprocessing-only; docking does not generate conformers
 
 **Outputs**:
-- Cleaned receptor: {outpath}/preprocessing/receptors/{protein_name}_{chain}_clean_h.pdb
-- PDBQT files: {outpath}/preprocessing/ligands/conformers_pdbqt/ or 3d_structures_pdbqt/
-- Mapping CSV: Must contain columns: ID, PDBQT_File
+- Cleaned receptor (no hydrogens): {outpath}/preprocessing/receptors/{protein_name}_{chain}_clean.pdb
+- Protonated receptor (with pKa-based hydrogens): {outpath}/preprocessing/receptors/{protein_name}_{chain}_protonated.pdb
+- PDBQT files: {output_dir}/pdbqt_files/ (both 2D and 3D pathways)
+- Mapping CSV: run_smiles_to_pdbqt returns path to docking_ready_ligands.csv (ID, PDBQT_File, ...). Pass this as input_data to docking.
+
+**CRITICAL**: Receptor preparation requires TWO steps:
+1. `run_clean_pdb()` - outputs `_clean.pdb` (no hydrogens)
+2. `run_protonate_receptor()` - outputs `_protonated.pdb` (with hydrogens)
+Use the `_protonated.pdb` file for docking and MD.
 
 **Next Steps**: Proceeds to Search Docking (Entry Point 2)
 
@@ -31,7 +37,7 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 ### Entry Point 2: Search Docking
 **Purpose**: Discover binding sites and dock ligands
 **Required Files**:
-- cleaned_receptor.pdb or cleaned_receptor.pdbqt
+- protonated_receptor.pdb or protonated_receptor.pdbqt (must be protonated, from run_protonate_receptor)
 - ligands_csv: CSV with columns: ID, PDBQT_File (all ligands pre-prepared as PDBQT)
 
 **What It Does**:
@@ -44,14 +50,14 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 
 **Next Steps**: Proceeds to MD Analysis (Entry Point 4)
 
-**IMPORTANT**: All ligands must be pre-prepared as PDBQT files before docking. If starting with raw SMILES or 3D structures, first run preprocessing (Entry Point 1).
+**IMPORTANT**: Docking requires a CSV with a PDBQT_File column. Conformers are generated only in preprocessing. If you have only SMILES/ID, run the preprocessing agent first (run_standardize_ligand_data → run_smiles_to_pdbqt) and use the returned mapping CSV as input_data.
 
 ---
 
 ### Entry Point 3: Production Docking Only
 **Purpose**: Dock at known binding sites (skip discovery)
 **Required Files**:
-- cleaned_receptor.pdb or cleaned_receptor.pdbqt
+- protonated_receptor.pdb or protonated_receptor.pdbqt (must be protonated, from run_protonate_receptor)
 - ligands_csv: CSV with columns: ID, PDBQT_File (all ligands pre-prepared as PDBQT)
 - docking_centers OR docking_centers_file
 
@@ -64,14 +70,14 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 
 **Next Steps**: Proceeds to MD Analysis (Entry Point 4)
 
-**IMPORTANT**: All ligands must be pre-prepared as PDBQT files before docking. If starting with raw SMILES or 3D structures, first run preprocessing (Entry Point 1).
+**IMPORTANT**: Docking requires a CSV with a PDBQT_File column. Conformers are generated only in preprocessing. If you have only SMILES/ID, run the preprocessing agent first (run_standardize_ligand_data → run_smiles_to_pdbqt) and use the returned mapping CSV as input_data.
 
 ---
 
 ### Entry Point 4: MD - Protein Topology
 **Purpose**: Start MD pipeline from protein topology generation
 **Required Files**:
-- cleaned_receptor.pdb
+- protonated_receptor.pdb (must be protonated, from run_protonate_receptor)
 - docking_results folder (with production_docking_results.csv)
 - ligand_input (SMILES string, CSV, SDF, or MOL2 file)
 
@@ -137,12 +143,12 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 ## Entry Point Detection Signals
 
 **Preprocessing (Entry Point 1)**:
-- User says: "raw", "needs cleaning", "clean the receptor", "have SMILES", "have SDF files"
-- File clues: PDB file without "_clean" or "_h" in name, or ligand files without PDBQT format
+- User says: "raw", "needs cleaning", "clean the receptor", "protonate the receptor", "have SMILES", "have SDF files"
+- File clues: PDB file without "_clean" or "_protonated" in name, or ligand files without PDBQT format
 
 **Search Docking (Entry Point 2)**:
-- User says: "already cleaned", "prepared", "discover binding sites", "have PDBQT files"
-- File clues: Receptor with "_clean" or "_h", CSV with PDBQT_File column, no docking_centers
+- User says: "already cleaned", "already protonated", "prepared", "discover binding sites", "have PDBQT files"
+- File clues: Receptor with "_protonated" (not just "_clean"), CSV with PDBQT_File column, no docking_centers
 
 **Production Docking (Entry Point 3)**:
 - User says: "binding sites known", "dock at these coordinates", "use centers"
@@ -155,6 +161,7 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 **MD - LigPrepare (Entry Point 5)**:
 - User says: "have protein topology", "protein.gro ready", "skip protein topology"
 - File clues: Has protein.gro AND topol.top
+- When starting here: pass water_model (e.g. tip3p, spc) to match the topology so solvation is consistent.
 
 **MD - Gro (Entry Point 6)**:
 - User says: "ligands are prepared", "have pose directories", "run MD simulations"

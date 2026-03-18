@@ -2,11 +2,13 @@
 Shared utility functions for the adams pipeline.
 
 This module contains general-purpose utilities that are used across
-multiple modules (docking, md_analysis, etc.) to avoid cross-module dependencies.
+multiple modules (docking, etc.) to avoid cross-module dependencies.
 """
 
 import multiprocessing as mp
+import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional, Tuple
@@ -64,15 +66,30 @@ def run_cmd(
     if capture_output:
         # Use PIPE and read in real-time to avoid fileno() issues with file-like objects
         # This approach works reliably with subprocess.Popen
-        def log_stream(stream, log_level="info"):
-            """Helper to log lines from stream in real-time."""
+        # Accumulate output so CalledProcessError includes real stderr/stdout
+        stdout_lines = []
+        stderr_lines = []
+
+        def log_stream(stream, log_level="info", lines_out=None):
+            """Helper to log lines from stream in real-time and optionally accumulate."""
             log_func = getattr(logger, log_level.lower(), logger.info)
-            for line in iter(stream.readline, ""):
-                if line:
-                    line = line.rstrip("\n\r")
-                    if line:  # Only log non-empty lines
-                        log_func(line)
-            stream.close()
+            try:
+                for line in iter(stream.readline, ""):
+                    if line:
+                        if lines_out is not None:
+                            lines_out.append(line)
+                        line_stripped = line.rstrip("\n\r")
+                        if line_stripped:
+                            log_func(line_stripped)
+            except (ValueError, OSError):
+                # Stream was closed by another thread (e.g. after process.wait());
+                # readline() can raise instead of returning "" when pipe is closed.
+                pass
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
         # Use Popen with PIPE to avoid fileno() issues
         process = subprocess.Popen(
@@ -87,14 +104,20 @@ def run_cmd(
             bufsize=1,  # Line buffered for real-time output
         )
 
-        # Start threads to log stdout and stderr in real-time
+        # Start threads to log stdout and stderr in real-time (and accumulate for exceptions)
         # Note: Many executables (like GROMACS) write normal output to stderr,
         # so we log both at INFO level to capture all output
         stdout_thread = threading.Thread(
-            target=log_stream, args=(process.stdout, "info"), daemon=True
+            target=log_stream,
+            args=(process.stdout, "info"),
+            kwargs={"lines_out": stdout_lines},
+            daemon=True,
         )
         stderr_thread = threading.Thread(
-            target=log_stream, args=(process.stderr, "info"), daemon=True
+            target=log_stream,
+            args=(process.stderr, "info"),
+            kwargs={"lines_out": stderr_lines},
+            daemon=True,
         )
 
         stdout_thread.start()
@@ -105,8 +128,17 @@ def run_cmd(
             process.stdin.write(input_str)
             process.stdin.close()
 
-        # Wait for process to complete
-        returncode = process.wait()
+        # Wait for process to complete; on interrupt, kill the subprocess first
+        try:
+            returncode = process.wait()
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
 
         # Close pipes to signal EOF to reader threads
         # This ensures threads see EOF immediately and exit naturally
@@ -115,16 +147,18 @@ def run_cmd(
 
         # Wait for logging threads to finish reading all buffered output
         # Threads will exit naturally when they see EOF (empty string from readline)
-        stdout_thread.join()
-        stderr_thread.join()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
 
-        # Create CompletedProcess object for compatibility
-        # Note: stdout/stderr are empty strings since output was streamed to logger
+        stdout_str = "".join(stdout_lines)
+        stderr_str = "".join(stderr_lines)
+
+        # Create CompletedProcess object for compatibility (includes real output for exceptions)
         result = subprocess.CompletedProcess(
             cmd,
             returncode,
-            stdout="",  # Already logged to logger
-            stderr="",  # Already logged to logger
+            stdout=stdout_str,
+            stderr=stderr_str,
         )
 
         if check and returncode != 0:
@@ -189,6 +223,89 @@ def get_gpu_count() -> int:
     return gpu_count
 
 
+def get_gpu_usage_decision() -> dict:
+    """
+    Resolve whether GPU should be used in the current runtime context.
+
+    Returns:
+        dict: Decision payload containing:
+            - use_gpu (bool): When ask_user_in_chat is True, this is False until
+              the user replies; the agent must ask in chat and then set use_gpu from
+              the user's answer.
+            - num_gpus (int)
+            - gpu_names (str)
+            - ask_user_in_chat (bool, optional): When True, the agent MUST ask the
+              user in chat whether to use GPUs and must not proceed with workflow
+              until the user answers. Set only when GPUs exist but stdin prompt
+              is unavailable (e.g. TUI or non-interactive).
+            - decision_source (str): one of
+              "no_gpu_available", "non_interactive_default", "interactive_user_yes",
+              "interactive_user_no", "interactive_eof_default"
+    """
+    gpu_count, gpu_names = get_gpu_info()
+    if gpu_count <= 0:
+        return {
+            "use_gpu": False,
+            "num_gpus": 0,
+            "gpu_names": "",
+            "decision_source": "no_gpu_available",
+        }
+
+    # In TUI/non-interactive mode, never block on stdin prompts.
+    force_non_interactive = os.environ.get("ADAMS_NON_INTERACTIVE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    } or os.environ.get("ADAMS_UI_MODE", "").lower() == "tui"
+    is_interactive_tty = bool(
+        sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty()
+    )
+    in_main_thread = threading.current_thread() is threading.main_thread()
+
+    if force_non_interactive or not is_interactive_tty or not in_main_thread:
+        print(
+            "GPU(s) detected, but interactive prompts are unavailable in this mode. "
+            "The agent will ask you in chat whether to use them for docking."
+        )
+        return {
+            "use_gpu": False,
+            "num_gpus": gpu_count,
+            "gpu_names": gpu_names,
+            "ask_user_in_chat": True,
+            "decision_source": "non_interactive_default",
+        }
+
+    print(f"Found {gpu_count} GPU(s): {gpu_names}")
+    while True:
+        try:
+            answer = input(
+                "Do you want to use the GPU(s) for accelerated processing? (y/n): "
+            ).lower()
+        except EOFError:
+            return {
+                "use_gpu": False,
+                "num_gpus": gpu_count,
+                "gpu_names": gpu_names,
+                "decision_source": "interactive_eof_default",
+            }
+        if answer in ["y", "yes"]:
+            return {
+                "use_gpu": True,
+                "num_gpus": gpu_count,
+                "gpu_names": gpu_names,
+                "decision_source": "interactive_user_yes",
+            }
+        elif answer in ["n", "no"]:
+            return {
+                "use_gpu": False,
+                "num_gpus": gpu_count,
+                "gpu_names": gpu_names,
+                "decision_source": "interactive_user_no",
+            }
+        else:
+            print("Invalid input. Please enter 'y' or 'n'.")
+
+
 def ask_to_use_gpu() -> bool:
     """
     Check for GPUs and ask the user if they want to use them.
@@ -196,20 +313,8 @@ def ask_to_use_gpu() -> bool:
     Returns:
         bool: True if GPUs are available and the user wants to use them, False otherwise.
     """
-    gpu_count, gpu_names = get_gpu_info()
-    if gpu_count > 0:
-        print(f"Found {gpu_count} GPU(s): {gpu_names}")
-        while True:
-            answer = input(
-                "Do you want to use the GPU(s) for accelerated processing? (y/n): "
-            ).lower()
-            if answer in ["y", "yes"]:
-                return True
-            elif answer in ["n", "no"]:
-                return False
-            else:
-                print("Invalid input. Please enter 'y' or 'n'.")
-    return False
+    decision = get_gpu_usage_decision()
+    return decision["use_gpu"]
 
 
 def list_agent_data_files(agent_data_path: Optional[str] = None) -> dict:

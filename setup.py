@@ -21,6 +21,9 @@ setup(
             "pipeline/md_analysis/mdp/*.mdp",
             # Bundled Vina-GPU artifacts (executable + OpenCL kernels)
             "pipeline/docking/vina_gpu/*",
+        ],
+        "adams_tui": [
+            "*.tcss",
         ]
     },
     python_requires=">=3.12",
@@ -31,13 +34,16 @@ setup(
         "matplotlib",
         "scikit-learn",
         "acpype",
+        "dimorphite-dl",
         "meeko==0.7.1",
         "mol-kit==0.0.1",
-        "vina==1.2.7",
-        "openai-agents",
+        "vina>=1.2.6",
+        "openai-agents[litellm]",
         "gemmi",
         "prompt_toolkit",
         "psutil",
+        "textual",
+        "keyring",
     ],
     extras_require={
         "dev": [
@@ -47,7 +53,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "adams=adams.cli:main",
+            "adams=adams_tui.app:main",
         ],
     },
 )

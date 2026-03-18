@@ -53,8 +53,9 @@ All outputs are organized in timestamped directories: `agent_data/outputs/run_YY
 ```
 output_folder/
 ├── preprocessing/
-│   ├── receptors/          # Cleaned protein PDB files
-│   │   └── {protein_name}_{chain}_clean_h.pdb
+│   ├── receptors/          # Cleaned and protonated protein PDB files
+│   │   ├── {protein_name}_{chain}_clean.pdb        # Cleaned (no hydrogens)
+│   │   └── {protein_name}_{chain}_protonated.pdb    # Protonated (with pKa-based hydrogens)
 │   ├── ligands/            # Processed ligand files
 │   │   ├── metal_compounds.csv
 │   │   ├── metal_organic_compounds.csv
@@ -103,8 +104,12 @@ output_folder/
 ### Preprocessing Outputs
 
 **`run_clean_pdb` outputs:**
-- `{outpath}/preprocessing/receptors/{prefix}_{chain}_clean_h.pdb` - Cleaned protein PDB (used by Docking Agent and MD Agent)
+- `{outpath}/preprocessing/receptors/{prefix}_{chain}_clean.pdb` - Cleaned protein PDB (no hydrogens)
 - `{outpath}/preprocessing/ligands/{prefix}_{ligand_set_name}.pdb` - Extracted ligand (if `ligand=True`)
+
+**`run_protonate_receptor` outputs (MANDATORY after run_clean_pdb):**
+- `{outpath}/preprocessing/receptors/{prefix}_{chain}_protonated.pdb` - Protonated protein PDB (with pKa-based hydrogens, used by Docking Agent and MD Agent)
+- `{outpath}/preprocessing/receptors/{prefix}_{chain}_protonated.pqr` - PQR file with charges
 
 **`run_data_processing` outputs:**
 - `{outpath}/preprocessing/ligands/{prefix}_smallMW.csv` - Compounds at/below MW cutoff (used by Docking Agent)

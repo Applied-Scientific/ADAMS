@@ -89,6 +89,8 @@ One complete run of `cli.py` - the top-level interaction with the controller age
 
 **Example**: "This session ran 3 pipeline executions with different parameters."
 
+**Session memory:** A session has **plan_paths** (a list) linked by the **workflow wrapper** when the executive calls workflow_agent with session_id. Meta_analysis uses get_session_plan_summary and read_plan_document for resume and diagnosis.
+
 ---
 
 ## Workflow Concepts
@@ -129,7 +131,7 @@ Mechanism where outputs from one stage become inputs to the next. The workflow a
 - **Preprocessing → Docking**: Cleaned receptor PDB, processed ligand CSV
 - **Docking → MD**: Production docking results CSV, ligand CSV, cleaned receptor
 
-**Example**: "Workflow agent passed `5LS6_A_clean_h.pdb` from preprocessing to docking agent."
+**Example**: "Workflow agent passed `5LS6_A_protonated.pdb` from preprocessing (run_protonate_receptor) to docking agent."
 
 ---
 
@@ -177,40 +179,41 @@ Python modules providing shared helper functions (no classes, no orchestration).
 
 ### **Main Agents** (orchestrate the pipeline)
 
-#### **Controller Agent** (`executive_agent.py`)
-- **Role**: Top-level user interface
-- **Scope**: Entire agent session, multiple executions
-- **Capabilities**: Interpret user intent, plan executions, compare results
-- **Example**: "Run 3 parameter sweeps and compare docking results"
+#### **Biophysics Controller** (`executive_agent.py`)
+- **Role**: Top-level user interface. Interprets user intent, decides multi-run strategy, obtains plan approval, delegates single-run execution to the workflow agent.
+- **Scope**: Entire agent session, multiple runs.
+- **Does not**: Specify pipeline mechanics or stage-level details.
 
 #### **Workflow Agent** (`workflow_agent.py`)
-- **Role**: Coordinate stages within a single execution
-- **Scope**: One pipeline execution (preprocessing → docking → MD)
-- **Capabilities**: Manage stage sequence, file path handoffs, logging setup
-- **Example**: "Hand off cleaned PDB from preprocessing to docking stage"
+- **Role**: Coordinate a single pipeline run (preprocessing → docking → MD). Manages stage sequence, handoffs, paths, logging.
+- **Scope**: One pipeline execution.
+- **Does not**: Assume defaults unless the user, approved plan, or executive context (including memory-derived preferences) specifies them; executive provides context.
 
 ---
 
-### **Stage Agents** (also called **Domain Agents**)
-LLM-powered agents that orchestrate specific pipeline stages.
+### **Stage Agents** (Domain Agents)
+Execute one pipeline stage each; receive instructions from the workflow agent.
 
-- `preprocessing_agent.py` - Orchestrates preprocessing stage
-- `docking_agent.py` - Orchestrates docking stage
-- `md_agent.py` - Orchestrates MD analysis stage
-
-**Key Point**: Stage agents call worker modules with appropriate parameters.
+- `preprocessing_agent.py` - **Preprocessing Agent**: receptor cleaning, protonation, ligand standardization/conformers only. Does not coordinate docking or MD.
+- `docking_agent.py` - **Docking Agent**: search and/or production docking only. Does not coordinate preprocessing or MD.
+- `md_agent.py` - **MD Agent**: MD prepare, simulate, analyze only. Does not coordinate preprocessing or docking.
 
 ---
 
 ### **Helper Agents**
-Specialized support agents that don't execute pipeline stages.
+Narrow-scope support; do not execute pipeline stages.
 
-- `file_finder_agent.py` - Scan files, recommend entry points
-- `meta_analysis_agent.py` - Analyze past execution traces and log files
-- `file_parser_agent.py` - Extract data from various file formats
-- `oversight_agent.py` - Monitor and validate execution
+- `file_finder_agent.py` - Discover and classify files (e.g. input files in CWD, intermediates in agent_data).
+- `meta_analysis_agent.py` - **Current-run error solving**; has session memory (read + write) and is **responsible for session tagging**. Analyzes traces and logs; tags sessions (e.g. "error", "docking") after analysis.
+- `file_parser_agent.py` - Extract structured data from result files.
+- `oversight_agent.py` - **Oversight Agent**: Validate execution plans only (scientific soundness, intent alignment, parameters). Does not execute or suggest pipeline mechanics.
 
-**Key Point**: Helper agents support main agents but don't run pipeline stages.
+### **Plan tags vs Session tags**
+| Entity | Who sets tags | Who uses them | Purpose |
+|--------|----------------|----------------|---------|
+| **Plans** | Workflow agent (`set_plan_tags`) | Controller (`get_all_plan_tags`, `list_plans_by_tag`) | Discover and reuse plans by tag |
+| **Sessions** | Meta_analysis agent only | Meta_analysis (read + tag) | Organize runs; record outcome/type for current-run context |
+The controller has **no session tools**; it discovers work via **plan tags** and reuses or creates plans via the workflow agent.
 
 ---
 

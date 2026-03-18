@@ -74,7 +74,17 @@ The pre-compiled Vina-GPU binaries are included with our release. They were buil
    ```bash
    adams
    ```
-The agent will prompt you for details or use configuration defaults.
+   The agent will prompt you for details or use configuration defaults.
+
+   **Command-line options:**
+   - `adams -h` or `adams --help` — print usage and all commands, then exit.
+   - `adams --continue-session SESSION_ID` — start the TUI and resume the given session. Conversation history from that session is restored. Session IDs have the form `YYYYMMDD_HHMMSS` (CLI) or `tui_...` (TUI); you can find them in session metadata or in trace filenames under `agent_data/traces/` (e.g. `trace_20260316_143022.jsonl` → session ID `20260316_143022`).
+
+   **CLI commands (one-shot; no TUI):** These commands run and exit without starting the interface.
+   - `adams instructions get` — print current custom instructions.
+   - `adams instructions set` / `append` — set or append custom instructions (inline text, `--file PATH`, or stdin). Max 100 words.
+   - `adams instructions clear` — clear custom instructions.
+   - `adams preferences clear` — reset user preferences (GPU usage, working directory, learned behaviors) to defaults.
 
 ### Pipeline Stages
 
@@ -86,7 +96,7 @@ The pipeline consists of three main stages: preprocessing, docking, and MD analy
 
 The preprocessing stage consists of two independent operations that can be run in any order:
 
-1. **Receptor Preparation** (`run_clean_pdb`): Cleans protein PDB structures by selecting chains, removing water molecules and unwanted heterogens, adding missing atoms and hydrogens, and optionally extracting bound ligands.
+1. **Receptor Preparation** (`run_clean_pdb` + `run_protonate_receptor`): Cleans protein PDB structures by selecting chains, keeping or removing heterogens and waters (default: keep_heterogens="essential"; use keep_heterogens=None to remove all), adding missing atoms (no hydrogens), then protonates using PDB2PQR+PROPKA for pKa-based protonation states, and optionally extracting bound ligands.
 
 2. **Ligand Preprocessing** (`run_ligand_preprocessing`): Processes ligand CSV files by filtering compounds by molecular weight, validating SMILES structures (optional), and optionally performing stratified sampling to create representative subsets of large libraries.
 
@@ -135,8 +145,9 @@ For detailed execution order, file path specifications, and entry point document
 ```
 output_folder/
 ├── preprocessing/
-│   ├── receptors/          # Cleaned protein PDB files
-│   │   └── {protein_name}_{chain}_clean_h.pdb
+│   ├── receptors/          # Cleaned and protonated protein PDB files
+│   │   ├── {protein_name}_{chain}_clean.pdb        # Cleaned (no hydrogens)
+│   │   └── {protein_name}_{chain}_protonated.pdb    # Protonated (with pKa-based hydrogens)
 │   ├── ligands/            # Processed ligand files
 │   │   ├── metal_compounds.csv
 │   │   ├── metal_organic_compounds.csv
@@ -261,7 +272,7 @@ Agents make autonomous decisions while worker modules handle the heavy computati
 **Purpose**: Prepare protein and ligand inputs for docking
 
 **What happens:**
-1. Protein cleaning: Remove waters, add hydrogens, assign charges
+1. Protein cleaning: Remove waters, add missing atoms (no hydrogens), then protonate using PDB2PQR+PROPKA (pKa-based protonation)
 2. Ligand filtering: Separate by molecular weight, identify metal-containing compounds
 3. Format conversion: Convert to formats required by AutoDock Vina (PDBQT)
 

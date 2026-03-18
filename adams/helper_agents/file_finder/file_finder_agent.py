@@ -57,6 +57,7 @@ def scan_directory(path: str = "") -> dict:
         >>> result = scan_directory("outputs")
         >>> # Scans the ./outputs directory
     """
+    print(f"[Agent] Scanning directory: {path if path else 'current directory'}...")
     return scan_directory_impl(path)
 
 
@@ -95,6 +96,7 @@ def read_csv_headers(file_path: str) -> dict:
         >>> result = read_csv_headers("docking_centers.csv")
         >>> # Returns column names like ['center_x', 'center_y', 'center_z'] for docking centers
     """
+    print(f"[Agent] Reading CSV headers: {file_path}")
     return read_csv_headers_impl(file_path)
 
 
@@ -131,6 +133,7 @@ def check_file_exists(file_path: str) -> dict:
         >>> result = check_file_exists("nonexistent.txt")
         >>> # Returns: {'exists': False, 'is_file': False, ...}
     """
+    print(f"[Agent] Checking existence: {file_path}")
     return check_file_exists_impl(file_path)
 
 
@@ -172,6 +175,7 @@ def check_directory_contents(dir_path: str, required_files: str) -> dict:
         >>> result = check_directory_contents("agent_data/run_1/md_analysis/poses/ligand1", "md.tpr,md.xtc,md.gro")
         >>> # Checks for completed MD simulation files
     """
+    print(f"[Agent] Verifying directory contents: {dir_path}")
     return check_directory_contents_impl(dir_path, required_files)
 
 
@@ -210,23 +214,36 @@ def read_file_preview(file_path: str, lines: int = 20) -> dict:
         >>> result = read_file_preview("docking_results.csv", lines=5)
         >>> # Returns first 5 lines including header
     """
+    print(f"[Agent] Reading file preview: {file_path}")
     return read_file_preview_impl(file_path, lines)
 
 
 prompt_path = Path(__file__).parent / "file_finder_prompt.md"
 system_prompt = prompt_path.read_text()
 
-file_finder_agent = Agent(
-    model="gpt-5-mini",
-    name="File Finder Agent",
-    instructions=system_prompt,
-    tools=[
-        read_reference_file,
-        scan_directory,
-        read_csv_headers,
-        check_file_exists,
-        check_directory_contents,
-        read_file_preview,
-    ],
-    model_settings=ModelSettings(tool_choice="auto"),
-)
+_file_finder_agent = None
+_file_finder_model = None
+
+
+def get_file_finder_agent() -> Agent:
+    global _file_finder_agent, _file_finder_model
+    from ...model_config import get_current_model_name, get_resolved_model
+
+    current_model = get_current_model_name()
+    if _file_finder_agent is None or _file_finder_model != current_model:
+        _file_finder_agent = Agent(
+            model=get_resolved_model(),
+            name="File Finder Agent",
+            instructions=system_prompt,
+            tools=[
+                read_reference_file,
+                scan_directory,
+                read_csv_headers,
+                check_file_exists,
+                check_directory_contents,
+                read_file_preview,
+            ],
+            model_settings=ModelSettings(tool_choice="auto"),
+        )
+        _file_finder_model = current_model
+    return _file_finder_agent

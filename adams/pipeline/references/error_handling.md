@@ -1,5 +1,7 @@
 # Error Handling Patterns
 
+For agent behavior, procedure, and report format, see `agent_error_handling.md`. This document is the developer reference for implementation details.
+
 ## Overview
 This document describes the error handling infrastructure in the pipeline. The system is designed to be robust to:
 1. **SIGINT (Ctrl+C)**: User interrupts cause immediate clean exit
@@ -161,7 +163,7 @@ def dock_ligand(v, ligand_id, ligand_pdbqt):
 ```python
 from adams.error_handling import safe_meeko_preparation
 
-result = safe_meeko_preparation(mol, "lig_001")
+result = safe_meeko_preparation(mol, "lig_001", charge_model="gasteiger")
 # Returns: (pdbqt_string, is_ok) or raises MeekoPreparationError
 ```
 
@@ -192,7 +194,7 @@ def _autodock_worker(self, batch, worker_id, log_queue):
     
     # Initialize resources
     v = Vina(...)
-    ligprep = MoleculePreparation()
+    ligprep = MoleculePreparation(charge_model="gasteiger")
     
     # Process each ligand
     for idx, (lig_idx, grid_idx) in enumerate(batch):

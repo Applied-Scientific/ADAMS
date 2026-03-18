@@ -1,0 +1,5 @@
+3mxf=3mxf.cif;ligand_resname=JQ1;ligand_chain=B;ligand_resseq=1
+3svg=3svg.cif;ligand_resname=ODR;ligand_chain=E;ligand_resseq=169
+3u5j=3u5j.cif;ligand_resname=08H;ligand_chain=B;ligand_resseq=1
+3u5l=3u5l.cif;ligand_resname=08K;ligand_chain=C;ligand_resseq=1
+4hbv=4hbv.cif;ligand_resname=15E;ligand_chain=D;ligand_resseq=203

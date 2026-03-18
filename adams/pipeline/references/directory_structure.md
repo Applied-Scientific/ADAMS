@@ -8,18 +8,18 @@ All pipeline outputs are automatically organized into a structured directory hie
 ```
 {output_root}/
 ├── preprocessing/
-│   ├── receptors/          # Cleaned protein PDB files
-│   │   └── {protein_name}_{chain}_clean_h.pdb
+│   ├── receptors/          # Cleaned and protonated protein PDB files
+│   │   ├── {protein_name}_{chain}_clean.pdb        # Cleaned (no hydrogens)
+│   │   └── {protein_name}_{chain}_protonated.pdb    # Protonated (with pKa-based hydrogens)
 │   ├── ligands/            # Processed ligand files
 │   │   ├── metal_compounds.csv
 │   │   ├── metal_organic_compounds.csv
 │   │   ├── {prefix}_largeMW.csv
 │   │   ├── {prefix}_smallMW.csv
 │   │   ├── {prefix}_frac{sampling_frac}.csv
-│   │   ├── conformers_pdbqt/  # Generated PDBQT files from SMILES
-│   │   │   └── {clean_id}.pdbqt
-│   │   ├── 3d_structures_pdbqt/  # Converted 3D structures to PDBQT
-│   │   │   └── {clean_id}.pdbqt
+│   │   ├── pdbqt_files/     # PDBQT files (from SMILES conformers or 3D conversion)
+│   │   │   └── {clean_id}.pdbqt (or {clean_id}_conf{i}.pdbqt for multi-conformer)
+│   │   ├── docking_ready_ligands.csv  # Mapping CSV (ID, PDBQT_File). Pass as input_data to docking.
 │   │   └── {protein_name}_{ligand_set}.pdb (if ligand extraction enabled)
 │
 ├── docking/
@@ -62,11 +62,12 @@ All pipeline outputs are automatically organized into a structured directory hie
 ## Key File Locations
 
 ### Preprocessing Outputs
-- **Cleaned Receptor**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_clean_h.pdb`
+- **Cleaned Receptor (no hydrogens)**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_clean.pdb`
+- **Protonated Receptor (with hydrogens)**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_protonated.pdb` (use this for docking/MD)
 - **Processed Ligands**: `{outpath}/preprocessing/ligands/{prefix}_smallMW.csv` (or sampled version)
 - **Sampled Dataset**: `{outpath}/preprocessing/ligands/{prefix}_frac{sampling_frac}.csv` (if sampling enabled)
-- **PDBQT Files (from SMILES)**: `{outpath}/preprocessing/ligands/conformers_pdbqt/{clean_id}.pdbqt`
-- **PDBQT Files (from 3D)**: `{outpath}/preprocessing/ligands/3d_structures_pdbqt/{clean_id}.pdbqt`
+- **PDBQT Files**: `{output_dir}/pdbqt_files/{clean_id}.pdbqt` (from SMILES conformers or 3D conversion)
+- **Mapping CSV**: `{output_dir}/docking_ready_ligands.csv` (ID, PDBQT_File). Pass this path as **input_data** to the docking agent.
 
 ### Docking Outputs
 - **Docking Centers (Search)**: `{out_folder}/docking/search/summaries/docking_centers.csv`
@@ -88,7 +89,8 @@ All pipeline outputs are automatically organized into a structured directory hie
 
 ## File Naming Patterns
 
-- **Cleaned Receptors**: `{protein_name}_{chain}_clean_h.pdb`
+- **Cleaned Receptors (no hydrogens)**: `{protein_name}_{chain}_clean.pdb`
+- **Protonated Receptors (with hydrogens)**: `{protein_name}_{chain}_protonated.pdb` (use for docking/MD)
 - **Docking Centers**: `docking_centers.csv` (in search/summaries/)
 - **Production Results**: `production_docking_results.csv` (in production/summaries/)
 - **Pose Directories**: `{ligand_name}_pocket_{grid_id}_top{rank}/`

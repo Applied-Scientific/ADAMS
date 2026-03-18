@@ -1,6 +1,8 @@
 import ast
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 from typing import Dict, List, Set
@@ -152,20 +154,40 @@ def run_python_in_conda(code: str, env_name: str = None) -> Dict[str, str]:
         script_path = f.name
 
     try:
-        # 3. Execute via conda run
-        # We use 'conda run -n env python script'
-        # Note: This assumes 'conda' is in the PATH.
-        cmd = [
-            "conda",
-            "run",
-            "-n",
-            env_name,
-            "--no-capture-output",  # Important to let stdout/stderr pass through to subprocess capture
-            "python",
-            script_path,
-        ]
+        # 3. Execute in requested environment.
+        # Prefer `conda run` when available. Fallback to current interpreter when
+        # already inside the target env and conda is not discoverable.
+        current_env = os.environ.get("CONDA_DEFAULT_ENV")
+        conda_exe = os.environ.get("CONDA_EXE") or shutil.which("conda")
 
-        logger.info(f"Executing custom python script via conda env '{env_name}'...")
+        if conda_exe:
+            cmd = [
+                conda_exe,
+                "run",
+                "-n",
+                env_name,
+                "--no-capture-output",  # Let child stdout/stderr flow through capture_output
+                "python",
+                script_path,
+            ]
+            logger.info(
+                f"Executing custom python script via conda env '{env_name}' (conda={conda_exe})."
+            )
+        elif current_env == env_name:
+            cmd = [sys.executable, script_path]
+            logger.warning(
+                "conda executable not found; running script with current interpreter "
+                f"({sys.executable}) in already-active env '{env_name}'."
+            )
+        else:
+            msg = (
+                "Could not execute custom Python code: conda executable is not available "
+                f"(env_name='{env_name}', current_env='{current_env}'). "
+                "Either ensure 'conda' is on PATH/CONDA_EXE is set, or activate the target "
+                "environment before running this tool."
+            )
+            logger.error(msg)
+            return {"stdout": "", "stderr": msg, "returncode": -1}
 
         result = subprocess.run(
             cmd,
@@ -174,12 +196,23 @@ def run_python_in_conda(code: str, env_name: str = None) -> Dict[str, str]:
             check=False,  # Don't raise exception on non-zero exit, return it
         )
 
+        # Normalize Ctrl+C from child (conda often reports CondaError: KeyboardInterrupt)
+        stderr = result.stderr
+        returncode = result.returncode
+        if returncode == 130 or "KeyboardInterrupt" in (stderr or ""):
+            logger.info("Script execution cancelled by user (Ctrl+C).")
+            stderr = "Execution cancelled by user (Ctrl+C)."
+            returncode = 130
+
         return {
             "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
+            "stderr": stderr,
+            "returncode": returncode,
         }
 
+    except KeyboardInterrupt:
+        logger.info("Script execution cancelled by user (Ctrl+C).")
+        raise
     except Exception as e:
         logger.error(f"Failed to execute script: {e}")
         return {"stdout": "", "stderr": str(e), "returncode": -1}

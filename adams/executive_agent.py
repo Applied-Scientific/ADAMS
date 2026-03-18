@@ -1,74 +1,171 @@
 from pathlib import Path
+from typing import List, Optional
 
 from agents import Agent, ModelSettings, function_tool
-from agents.tracing import add_trace_processor
+from agents.tracing import set_trace_processors
 
-from .common_utils import ask_to_use_gpu
-from .helper_agents.file_finder.file_finder_agent import file_finder_agent
-from .helper_agents.file_parser.file_parser_agent import file_parser_agent
-from .helper_agents.meta_analysis.meta_analysis_agent import meta_analysis_agent
-from .helper_agents.oversight.oversight_agent import oversight_agent
-from .path_config import get_agent_data_path, set_agent_data_path
-from .pipeline.data_preprocessing.preprocessing_agent import preprocessing_agent
-from .pipeline.workflow_agent import workflow_agent
+from .common_utils import get_gpu_usage_decision
+from .helper_agents.file_finder.file_finder_agent import get_file_finder_agent
+from .helper_agents.file_parser.file_parser_agent import get_file_parser_agent
+from .helper_agents.meta_analysis.meta_analysis_agent import get_meta_analysis_agent
+from .helper_agents.oversight.oversight_agent import get_oversight_agent
+from .memory.memory_tools import (
+    PERSISTENT_MEMORY_TOOLS,
+    set_session_description_tool,
+    set_session_tags_tool,
+    tag_session,
+)
+from .memory.persistent_memory import get_memory_summary
+from .memory.session_memory import get_session_context_summary, format_session_context_for_prompt
+from .path_config import get_agent_data_path, set_agent_data_path, set_current_session_id
+from .pipeline.workflow_wrapper import _make_workflow_agent_wrapper
 from .utils import list_agent_data_files
 from .utils.trace_writer import JsonTraceProcessor
+from .pipeline.references.reference_file_reader import read_reference_file
+from .user_plan_utils import (
+    append_to_plan_section,
+    clone_plan,
+    get_all_plan_tags,
+    list_plans_by_tag,
+    read_plan_document,
+)
+from .pipeline.workflow_agent import create_run_directory
+from .plan_questions_tool import collect_plan_answers
 
 
-def _load_reference_files(*filenames: str) -> str:
-    """
-    Load reference markdown files and format them for embedding in system prompts.
+from .model_config import get_resolved_model, set_model
 
-    Args:
-        *filenames: Names of reference files to load (e.g., "entry_points.md")
 
-    Returns:
-        Formatted string containing all reference file contents
-    """
-    references_dir = Path(__file__).parent / "pipeline" / "references"
-    sections = []
-
-    for filename in filenames:
-        file_path = references_dir / filename
-        if file_path.exists():
-            content = file_path.read_text(encoding="utf-8")
-            # Extract title from filename (e.g., "entry_points.md" -> "Entry Points")
-            title = filename.replace(".md", "").replace("_", " ").title()
-            sections.append(f"\n## {title}\n\n{content}")
-
-    if sections:
-        return "\n# Reference Documentation\n" + "\n".join(sections)
-    return ""
+_active_trace_processor: Optional[JsonTraceProcessor] = None
 
 
 @function_tool
 def get_gpu_spec_from_user() -> dict:
     """
-    Check for GPUs and ask the user if they want to use them.
+    Resolve GPU usage preference when the user did not specify CPU/GPU.
 
-    **USAGE**: Only call this function when:
-    1. The user's original request did NOT mention GPU usage, AND
-    2. You need to check if CUDA GPUs are available and ask the user
+    Call this tool when hardware preference is undecided (e.g. start of a run).
+    Do not call it if the user already explicitly requested GPU or CPU.
 
-    This function will:
-    - Check if CUDA GPUs are available (via nvidia-smi)
-    - If GPUs found: Ask the user if they want to use them
-    - If no GPUs found: Return False without asking
-
-    Do NOT call this if user already requested GPU in their original prompt.
+    Behavior:
+    - Detect available CUDA GPUs via `nvidia-smi`
+    - If GPUs exist and stdin is interactive (TTY): prompt the user on stdin (y/n)
+    - If GPUs exist but context is non-interactive (e.g. TUI): return ask_user_in_chat=True;
+      you MUST then ask the user in chat: "I detected N GPU(s): {gpu_names}. Do you want to
+      use them for docking?" and use their reply to set use_gpu before calling workflow_agent
+    - If no GPU is available: return use_gpu=False (no prompt needed)
 
     Returns:
-        dict: Contains:
-            - 'use_gpu' (bool): True if GPUs are available and user wants to use them
-            - 'num_gpus' (int): Number of GPUs detected (0 if none available)
-            - 'gpu_names' (str): Names of detected GPUs
+        dict: Hardware decision payload with:
+            - `use_gpu` (bool): True/False from user or from context; when ask_user_in_chat
+              is True, this is False until you ask in chat and set it from the user's answer
+            - `num_gpus` (int): Number of detected GPUs (0 if unavailable)
+            - `gpu_names` (str): Comma-separated GPU names, empty if unavailable
+            - `ask_user_in_chat` (bool, optional): When True, you MUST ask the user in chat
+              whether to use GPUs and must not proceed until they answer
+            - `decision_source` (str): Why this decision was made
+    """
+    return get_gpu_usage_decision()
+
+
+@function_tool
+def resolve_gpu_config(
+    use_gpu: bool = True,
+    requested_num_gpus: Optional[int] = None,
+    requested_gpu_ids: Optional[List[int]] = None,
+) -> dict:
+    """
+    Resolve and validate GPU allocation for downstream docking tool calls.
+
+    This tool removes ambiguity around GPU selection by normalizing user intent
+    against detected hardware. It should be used before calling workflow/docking
+    when GPU usage is enabled.
+
+    Rules:
+    - If use_gpu=False: returns num_gpus=0 and empty gpu_ids.
+    - If use_gpu=True and neither requested_num_gpus nor requested_gpu_ids is set:
+      allocate all detected GPUs.
+    - If requested_gpu_ids is provided, it takes precedence over requested_num_gpus.
+    - If requested_num_gpus is provided, allocate GPU IDs [0..requested_num_gpus-1].
+    - Validates bounds against detected GPU count.
+
+    Returns:
+        dict with keys:
+            - use_gpu (bool)
+            - available_gpus (int)
+            - gpu_names (str)
+            - num_gpus (int)
+            - gpu_ids (list[int])
+            - source (str): one of "disabled", "auto_all", "requested_ids", "requested_count"
     """
     from .common_utils import get_gpu_info
 
-    gpu_count, gpu_names = get_gpu_info()
-    use_gpu = ask_to_use_gpu()
+    available_gpus, gpu_names = get_gpu_info()
 
-    return {"use_gpu": use_gpu, "num_gpus": gpu_count, "gpu_names": gpu_names}
+    if not use_gpu:
+        return {
+            "use_gpu": False,
+            "available_gpus": available_gpus,
+            "gpu_names": gpu_names,
+            "num_gpus": 0,
+            "gpu_ids": [],
+            "source": "disabled",
+        }
+
+    if available_gpus <= 0:
+        raise ValueError(
+            "GPU requested but no GPUs were detected on this host."
+        )
+
+    if requested_gpu_ids is not None:
+        if len(requested_gpu_ids) == 0:
+            raise ValueError("requested_gpu_ids must not be empty.")
+        if any(gid < 0 for gid in requested_gpu_ids):
+            raise ValueError(f"GPU IDs must be non-negative, got: {requested_gpu_ids}")
+        if any(gid >= available_gpus for gid in requested_gpu_ids):
+            raise ValueError(
+                f"requested_gpu_ids {requested_gpu_ids} exceed available GPU range "
+                f"[0..{available_gpus - 1}]"
+            )
+        gpu_ids = sorted(set(requested_gpu_ids))
+        return {
+            "use_gpu": True,
+            "available_gpus": available_gpus,
+            "gpu_names": gpu_names,
+            "num_gpus": len(gpu_ids),
+            "gpu_ids": gpu_ids,
+            "source": "requested_ids",
+        }
+
+    if requested_num_gpus is not None:
+        if requested_num_gpus <= 0:
+            raise ValueError(
+                f"requested_num_gpus must be positive, got: {requested_num_gpus}"
+            )
+        if requested_num_gpus > available_gpus:
+            raise ValueError(
+                f"requested_num_gpus={requested_num_gpus} exceeds available GPUs={available_gpus}"
+            )
+        gpu_ids = list(range(requested_num_gpus))
+        return {
+            "use_gpu": True,
+            "available_gpus": available_gpus,
+            "gpu_names": gpu_names,
+            "num_gpus": requested_num_gpus,
+            "gpu_ids": gpu_ids,
+            "source": "requested_count",
+        }
+
+    # Default: if GPU is requested and no explicit count/IDs are given, use all GPUs.
+    gpu_ids = list(range(available_gpus))
+    return {
+        "use_gpu": True,
+        "available_gpus": available_gpus,
+        "gpu_names": gpu_names,
+        "num_gpus": available_gpus,
+        "gpu_ids": gpu_ids,
+        "source": "auto_all",
+    }
 
 
 @function_tool
@@ -78,10 +175,13 @@ def set_working_directory_tool(
     """
     Set the working directory where agent_data will be created for logs, traces, and outputs.
 
+    **IMPORTANT**: By default, the working directory is automatically set to the current working directory
+    (where adams is called from). Only call this tool when the user explicitly requests a different directory.
+
     Call this tool when:
-    - User specifies where their input files are located
-    - User tells you a project directory to work in
-    - Beginning a new session and need to establish the working location
+    - User explicitly specifies a different directory than the current working directory
+    - User tells you a project directory to work in that differs from CWD
+    - User provides a file path and you need to set agent_data in that file's directory
 
     Args:
         directory_path: Direct path to use for agent_data parent directory (e.g., "/path/to/project")
@@ -91,11 +191,11 @@ def set_working_directory_tool(
         dict: Contains 'agent_data_path' (str) showing where data will be stored
 
     Example:
-        >>> # User says "my files are in /data/project1/"
+        >>> # User says "my files are in /data/project1/" (different from CWD)
         >>> set_working_directory_tool(directory_path="/data/project1")
         >>> # agent_data will be at /data/project1/agent_data
 
-        >>> # User says "my receptor is at /data/project1/receptor.pdb"
+        >>> # User says "my receptor is at /data/project1/receptor.pdb" (different from CWD)
         >>> set_working_directory_tool(input_file_path="/data/project1/receptor.pdb")
         >>> # agent_data will be at /data/project1/agent_data
     """
@@ -127,8 +227,8 @@ def list_agent_data_files_tool() -> dict:
     - User asks "what files do I have?" or "what can I run?"
     - You want to identify receptor and ligand files without detailed scanning
 
-    Note: For more detailed file discovery and entry point analysis, use the file_finder_agent
-    which provides comprehensive scanning and entry point recommendations.
+    Note: For more structured file discovery, use the file_finder_agent.
+    It searches the CWD for new runs and `agent_data/` only for resume-style requests.
 
     Returns:
         dict: Dictionary containing:
@@ -153,12 +253,15 @@ def list_agent_data_files_tool() -> dict:
     return list_agent_data_files()
 
 
-def setup_tracing() -> JsonTraceProcessor:
+def setup_tracing(session_id: Optional[str] = None) -> JsonTraceProcessor:
     """
     Set up JSON trace processor for tracking all agent interactions.
 
     This is completely separate from the pipeline logger (logger_utils.py).
     Trace files are written to agent_data/traces/ with real-time updates.
+
+    Args:
+        session_id: Optional session ID to continue. If None, creates a new session.
 
     Returns:
         JsonTraceProcessor: The configured trace processor instance
@@ -166,19 +269,39 @@ def setup_tracing() -> JsonTraceProcessor:
     Raises:
         RuntimeError: If trace processor initialization fails
     """
+    global _active_trace_processor
     try:
+        # One launcher process -> one active trace/session. Reuse if already initialized.
+        if _active_trace_processor is not None:
+            set_trace_processors([_active_trace_processor])
+            set_current_session_id(_active_trace_processor.session_id)
+            return _active_trace_processor
+
         trace_output_dir = get_agent_data_path() / "traces"
-        trace_processor = JsonTraceProcessor(output_dir=str(trace_output_dir))
-        add_trace_processor(trace_processor)
-        print(f"[Tracing] Session trace file: {trace_processor.filepath}")
+        trace_processor = JsonTraceProcessor(
+            output_dir=str(trace_output_dir), session_id=session_id
+        )
+        # Replace any existing processors so one session = one trace file (no duplicates)
+        set_trace_processors([trace_processor])
+        set_current_session_id(trace_processor.session_id)
+        _active_trace_processor = trace_processor
+        if session_id:
+            print(f"[Tracing] Continuing session trace file: {trace_processor.filepath}")
+        else:
+            print(f"[Tracing] Session trace file: {trace_processor.filepath}")
         return trace_processor
     except Exception as e:
         raise RuntimeError(f"Failed to initialize trace processor: {e}") from e
 
 
-def create_agent() -> Agent:
+def create_agent(session_id: Optional[str] = None, model: str = "gpt-5.4") -> Agent:
     """
     Create and configure the Biophysics Controller Agent.
+
+    Args:
+        session_id: Optional current session ID; when set, the agent is prompted to tag
+            this session when starting work and update description/tags when concluding.
+        model: The LLM model identifier to use (default: gpt-5.4).
 
     Returns:
         Agent: The configured agent instance with all tools and settings
@@ -186,45 +309,67 @@ def create_agent() -> Agent:
     prompt_path = Path(__file__).parent / "agent_prompt.md"
     base_prompt = prompt_path.read_text()
 
-    # Load and embed reference documentation
-    reference_docs = _load_reference_files(
-        "entry_points.md",
-        "parameter_defaults.md",
-        "workflow_examples.md",
-    )
+    # Load persistent memory to insert near end of prompt
+    try:
+        memory_summary = get_memory_summary()
+    except Exception:
+        memory_summary = ""
 
-    system_prompt = base_prompt + reference_docs
+    # Recent session context (tags + recent sessions) for discovery and alignment with past runs
+    try:
+        session_ctx = get_session_context_summary(limit_sessions=10)
+        session_context_block = format_session_context_for_prompt(session_ctx)
+    except Exception:
+        session_context_block = ""
+
+    # Build system prompt - memory summary, recent session context, optional session_id, final note
+    sections = [base_prompt]
+    if memory_summary:
+        sections.append(f"\n{memory_summary}")
+    if session_context_block:
+        sections.append(f"\n=== RECENT SESSION CONTEXT ===\n{session_context_block}\n==============================")
+    if session_id:
+        sections.append(f"\nCurrent session ID: {session_id}.")
+    sections.append("\nNote: Reference documentation is available via the read_reference_file tool. Use it to look up entry points, parameter defaults, and examples.")
+    system_prompt = "\n".join(sections)
+
+    set_model(model)
+    resolved_model = get_resolved_model()
 
     agent = Agent(
-        model="gpt-5.2-pro",
+        model=resolved_model,
         name="Biophysics Controller Agent",
         instructions=system_prompt,
         tools=[
             set_working_directory_tool,
             list_agent_data_files_tool,
             get_gpu_spec_from_user,
-            meta_analysis_agent.as_tool(
+            resolve_gpu_config,
+            read_plan_document,
+            append_to_plan_section,
+            collect_plan_answers,
+            get_all_plan_tags,
+            list_plans_by_tag,
+            clone_plan,
+            create_run_directory,
+            read_reference_file,
+            *PERSISTENT_MEMORY_TOOLS,
+            set_session_description_tool,
+            set_session_tags_tool,
+            tag_session,
+            get_meta_analysis_agent().as_tool(
                 tool_name="meta_analysis_agent",
-                tool_description="""An agent that analyzes pipeline trace files and log files to understand run state.
+                tool_description="""An agent for solving errors in the current run. It has access to trace/log parsing, read-only session history, and read_plan_document for context.
 
                 Use this agent when:
-                - User wants to resume a previous run ("continue", "resume", "pick up where we left off")
-                - After an error occurs and you need to understand what happened
-                - To check if there's an active/incomplete run before starting a new one
+                - An error or failure occurred in the current run and you need to diagnose and fix it
+                - You need trace and log analysis for the current session to understand what went wrong
 
-                The agent will read the most recent trace file and log files and provide:
-                - Output folder and log file paths from the previous run
-                - Which pipeline steps completed successfully
-                - Which steps had errors and error details
-                - File paths used (receptor, ligands, docking centers, etc.)
-                - Run status (completed, error, incomplete)
-                - Entry point used and recommendation for resuming
-
-                CRITICAL: When resuming a run, use the SAME output_folder from the meta analysis.""",
+                The agent will use trace files, log files, session history, and the plan (when plan_path is available) to provide run state, error details, and resume recommendations.""",
             ),
-            file_finder_agent.as_tool(
+            get_file_finder_agent().as_tool(
                 tool_name="file_finder_agent",
-                tool_description="""An intelligent agent that scans agent_data/ to identify and classify files for the pipeline.
+                tool_description="""An intelligent agent that locates the files needed to start or resume the pipeline.
 
                 Use this agent when:
                 - User wants to start the pipeline but you're unsure which step to begin from
@@ -233,27 +378,21 @@ def create_agent() -> Agent:
                 - User asks "what can I run?" or "where can I start?"
 
                 The agent will:
-                1. Scan agent_data/ and its subdirectories (including outputs/)
-                2. Identify file types: receptors, SMILES CSVs, docking results, protein topology, pose directories, etc.
-                3. Determine which pipeline entry points are available
-                4. Recommend the most advanced entry point that has all required files
-                5. Report any missing files
+                1. Scan the CWD root for new-run inputs, or `agent_data/` only for resume-style requests
+                2. Identify file types: receptors, ligand inputs, docking results, protein topology, pose directories, etc.
+                3. Determine the best-supported entry point from file evidence
+                4. Return the path bindings needed for that entry point
 
-                Output includes:
-                - DETECTED FILES section with paths for each file type
-                - AVAILABLE ENTRY POINTS section showing which steps are READY vs MISSING requirements
-                - RECOMMENDED ENTRY POINT (most advanced available step)
-                - NOTES about any ambiguities or recommendations""",
+                Output is concise: RECOMMENDED ENTRY POINT, RELEVANT PATHS (only the paths required for that entry point), WORKFLOW PARAMETERS (path bindings only), and brief NOTES if needed.""",
             ),
-            file_parser_agent.as_tool(
+            get_file_parser_agent().as_tool(
                 tool_name="file_parser_agent",
-                tool_description="""An agent that extracts structured statistics from pipeline output files to enable parameter extraction and result-based decision making.
+                tool_description="""An agent that extracts structured statistics from pipeline output files.
 
                 Use this agent when:
-                - You need to analyze docking results to determine parameters for the next step (e.g., optimal `tops` parameter for MD)
-                - You want to summarize docking or MD results for the user
-                - You need to extract statistics from previous runs to inform parameter decisions
-                - You want to check MD completion status or identify which poses completed
+                - You need evidence from docking or MD outputs without loading large files
+                - You want to summarize docking results for the user
+                - You want to check completion status or identify which poses are available
                 - You need to analyze affinity distributions, pose counts, or pocket statistics
 
                 The agent can:
@@ -262,58 +401,34 @@ def create_agent() -> Agent:
                 - Pose counts per ligand and per pocket
                 - Pocket analysis (which pockets have best affinities)
                 - Affinity percentiles and ranges
-                2. Parse MD results directories to extract:
-                - Completion status (protein topology, ligand prep, MD simulations, analysis)
-                - Pose statistics (total prepared, completed, with analysis)
-                - File paths (protein files, analysis reports, pose directories)
+                2. Parse docking results to extract statistics.
+                - Pose counts, affinity stats, pocket analysis
 
-                Use this agent in conjunction with meta_analysis_agent and file_finder_agent to gather comprehensive information about pipeline state and results.""",
+                It returns evidence; the caller decides parameters and next actions.""",
             ),
-            oversight_agent.as_tool(
+            get_oversight_agent().as_tool(
                 tool_name="oversight_agent",
                 tool_description="""An agent that reviews and validates pipeline execution plans before execution.
 
-            **CRITICAL: You MUST submit your plan to the oversight_agent for review before calling workflow_agent.**
+            **BEFORE calling this tool:** (1) The plan document must exist and be filled by the workflow and stage agents. (2) User must have answered plan questions and you must have recorded them: get questions via collect_plan_answers(plan_path), present them in chat, then append_to_plan_section(plan_path, "answers", ...) when the user replies. Submit to oversight **after** that so oversight sees the finalized plan. Do NOT submit a hand-written "proposed plan" or a plan without answers when questions exist.
+            - When no plan exists: Call workflow_agent in plan-only mode (user's exact message). After workflow returns plan_path, if the plan has questions get them via collect_plan_answers(plan_path), present in chat, record answers when the user replies, then read_plan_document(plan_path) and call oversight_agent once.
+            - When you already have a plan_path with answers recorded: Call read_plan_document(plan_path), then call oversight_agent with that plan and the user's request.
+
+            **CRITICAL: Submit the plan to oversight_agent only AFTER the plan exists, is filled, and user answers are recorded (Step 6 then Step 7). Call oversight once with the finalized plan; if rejected, revise and resubmit once.**
 
             Use this agent when:
-            - You have formulated a plan to execute the pipeline
-            - Before calling workflow_agent for the first time in a conversation
-            - When proposing significant parameter changes or non-standard workflows
-            - When the user request is ambiguous and you need validation of your interpretation
+            - You have a plan_path, have collected and recorded user answers (if the plan had questions), and have read the plan via read_plan_document(plan_path)
+            - You need validation before execution
 
-            The oversight agent will:
-            1. Validate that your plan makes scientific sense in the context of molecular docking/biophysics
-            2. Check that your plan aligns with the user's request
-            3. Review parameter choices for reasonableness and consistency
-            4. Identify potential issues before execution
-            5. Provide feedback and suggestions
+            The oversight agent returns: exact_plan, feedback, concerns, suggestions. Use exact_plan as the plan to execute.
 
-            **WORKFLOW WITH OVERSIGHT:**
-            1. Interpret user intent and gather necessary information
-            2. Formulate your execution plan (what you will do, which entry point, parameters)
-            3. **Submit plan to oversight_agent for review** - include:
-            - The user's original request
-            - Your proposed plan (description of steps)
-            - Proposed parameters (as a dictionary)
-            - Entry point you plan to use
-            - Any relevant context (e.g., "resuming from previous run", "user agreed to GPU usage when prompted")
-            4. Review the oversight feedback:
-            - If approved: Proceed with execution (may still have suggestions to consider)
-            - If rejected: Revise plan based on feedback and resubmit
-            - Address any concerns or suggestions before proceeding
-            5. Execute the validated plan using workflow_agent
-
-            **IMPORTANT:**
-            - Always submit plans before execution - oversight helps prevent errors and wasted computation
-            - If oversight raises concerns, address them before proceeding
-            - You can still proceed if oversight approves with minor suggestions, but consider the feedback
-            - For very simple, straightforward requests (e.g., "run docking"), oversight may approve quickly
-            - For complex or ambiguous requests, oversight feedback is especially valuable""",
+            **WORKFLOW:**
+            1. workflow_agent in plan-only mode → plan_path.
+            2. collect_plan_answers(plan_path); present questions in chat; append_to_plan_section(plan_path, "answers", ...) when user replies.
+            3. read_plan_document(plan_path); oversight_agent(plan, user request).
+            4. If approved: workflow_agent(..., plan_path=..., session_id=...) to execute. If rejected: Revise and resubmit once.""",
             ),
-            workflow_agent.as_tool(
-                tool_name="workflow_agent",
-                tool_description="An agent that coordinates the complete molecular docking workflow. Use this agent for full pipelines (preprocessing -> docking -> MD), or individual steps. It also supports custom data manipulation and Python code execution via the preprocessing agent. You can specify whether to use the GPU by passing use_gpu=True or use_gpu=False.",
-            ),
+            _make_workflow_agent_wrapper(),
         ],
         model_settings=ModelSettings(tool_choice="auto"),
     )

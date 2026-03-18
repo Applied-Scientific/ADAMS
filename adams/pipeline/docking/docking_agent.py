@@ -5,22 +5,22 @@ This module provides function tools for the molecular docking pipeline.
 The agent must execute steps in the strict sequence defined below.
 
 MODULE EXECUTION ORDER (strict sequence):
-    1. run_vina_dock (search mode) - Discover binding sites by systematic docking
+    1. run_docking (search mode) - Discover binding sites by systematic docking
     2. run_find_pocket - Cluster search results to identify binding pockets
-    3. run_vina_dock (production mode) OR run_vina_dock_gpu - Production docking at identified sites
+    3. run_docking (production mode) - Production docking at identified sites
 
 MODULE DEPENDENCIES:
 
-    run_vina_dock (search mode):
-        Inputs: input_data, receptor
+    run_docking (search mode):
+        Inputs: input_data, receptor, backend
         Outputs: best_search_docking_centers.csv
 
     run_find_pocket:
         Inputs: input_file (from search output), out_path
         Outputs: docking_centers.csv (top N binding pockets)
 
-    run_vina_dock (production mode) / run_vina_dock_gpu:
-        Inputs: input_data, receptor, docking_centers_file (from find_pocket output)
+    run_docking (production mode):
+        Inputs: input_data, receptor, backend, docking_centers_file (from find_pocket output)
         Outputs: production_docking_results.csv
 """
 
@@ -31,200 +31,257 @@ from typing import List, Optional
 import pandas as pd
 from agents import Agent, function_tool
 
-from ...common_utils import get_cpu_count, get_gpu_count
-from ...helper_agents.file_parser.file_parser_agent import file_parser_agent
-from ...logger_utils import get_logger
+from ...common_utils import get_gpu_count
+from ...helper_agents.file_parser.file_parser_agent import get_file_parser_agent
+from ...logger_utils import get_logger, setup_logger
+from ...model_config import get_current_model_name, get_resolved_model
+from ...user_plan_utils import (
+    append_to_plan_section,
+    contribute_stage_to_plan,
+    read_plan_document,
+)
+from ..charge_model import validate_charge_model
 from ..file_organization import setup_docking_dirs
 from ..references.reference_file_reader import read_reference_file
-from .conformer_generation import generate_conformers_from_csv
+from .docking import DockingPipeline
 from .find_pocket import FindPocket
-from .vina_dock import VinaDock
-from .vina_dock_gpu import VinaDockGPU
 
 
 @function_tool
-def generate_3d_conformers(input_csv: str, out_folder: str = "out_folder") -> str:
-    """
-    Generates 3D conformers for ligands in a CSV file (SMILES) and saves them as SDF files.
-    Returns the path to a new CSV file pointing to these SDF files.
-
-    Use this tool BEFORE docking if you have SMILES strings and want to generate 3D structures
-    explicitly, or if you want to ensure consistent 3D structures are used.
-
-    Args:
-        input_csv: Path to input CSV with "SMILES" and "ID" columns.
-        out_folder: Folder to save generated conformers. Default: "out_folder"
-
-    Returns:
-        str: Path to the updated CSV file containing paths to the generated 3D structure files.
-    """
-    return generate_conformers_from_csv(input_csv, out_folder)
-
-
-@function_tool
-def run_vina_dock(
+def run_docking(
     input_data: str,
     receptor: str,
-    complex: str = None,
+    backend: str = "vina",
+    # Common parameters
+    complex: Optional[str] = None,
     mode: str = "production",
     num_pockets: int = 1,
     num_poses: int = 5,
     docking_centers: Optional[List[float]] = None,
-    docking_centers_file: str = None,
+    docking_centers_file: Optional[str] = None,
     minimized_dock: bool = False,
     search_gridsize: float = 25.0,
+    production_gridsize: Optional[float] = None,
+    lock_grid_center: bool = True,
     search_margin: float = 5.0,
-    auto_dock_num_cores: int = 1,
     out_folder: str = "out_folder",
+    log_file: Optional[str] = None,
+    pH: float = 7.4,
+    charge_model: str = "gasteiger",
+    # CPU (vina) specific
     num_cores: Optional[int] = None,
-) -> str:
-    """
-    Run molecular docking using AutoDock Vina (CPU-based).
-
-    This function can perform both search docking (to discover binding sites) and production
-    docking (at known binding sites) depending on the mode parameter.
-
-    Args:
-        input_data: Path to CSV file containing ligand dataset with ID and PDBQT_File columns.
-            All ligands must be pre-prepared as PDBQT files in the preprocessing module.
-        receptor: Path to receptor protein structure file (PDB or PDBQT format).
-            If PDB format is provided, it will be automatically converted to PDBQT.
-        mode: Docking mode. "search" for exploratory binding site discovery,
-            "production" for production docking at known sites. Default: "production"
-        complex: Optional. Path to complex structure with bound ligand for automatic center
-            detection. Format: "filename,resname1[,resname2,...]".
-            Example: "complex.pdb,LIG1,LIG2". If provided, overrides docking_centers. Default: None
-        docking_centers: Optional. Manual specification of binding site coordinates in Angstroms.
-            Format: [x1, y1, z1, x2, y2, z2, ...] for multiple sites.
-            Example: [10.5, 15.2, 8.7, -5.0, 3.2, 12.1]. Ignored if complex or docking_centers_file
-            is provided. Default: None
-        docking_centers_file: Optional. Path to CSV file with docking center coordinates,
-            typically from run_find_pocket output (docking_centers.csv). If provided,
-            overrides docking_centers and num_pockets. Default: None
-        num_pockets: Number of binding sites to dock into. Default: 1
-        num_poses: Number of binding poses to generate per ligand per site. Default: 5
-        minimized_dock: If True, performs energy minimization before docking. Default: False
-        search_gridsize: Size of the docking box in Angstroms. Default: 25.0
-        search_margin: Additional margin in Angstroms added to docking box boundaries. Default: 5.0
-        auto_dock_num_cores: Number of CPU cores per AutoDock Vina subprocess. Default: 1
-        out_folder: Output directory for all docking results. Default: "out_folder"
-        num_cores: Number of parallel CPU cores for running multiple docking jobs simultaneously.
-            If None, uses (CPU count - 1). Default: None
-
-    Returns:
-        str: Path to the output CSV file containing docking results.
-             - For search mode: {out_folder}/docking/search/summaries/best_search_docking_centers.csv
-             - For production mode: {out_folder}/docking/production/summaries/production_docking_results.csv
-    """
-    if num_cores is not None and num_cores <= 0:
-        raise ValueError(
-            f"num_cores must be None (for auto-detection) or a positive integer, got {num_cores}. "
-            "To use auto-detection, omit the num_cores parameter entirely (do not pass 0)."
-        )
-    if num_cores is None:
-        num_cores = get_cpu_count()
-
-    vina_dock = VinaDock(
-        input_data=input_data,
-        receptor=receptor,
-        complex=complex,
-        mode=mode,
-        num_pockets=num_pockets,
-        num_poses=num_poses,
-        docking_centers=docking_centers,
-        docking_centers_file=docking_centers_file,
-        minimized_dock=minimized_dock,
-        search_gridsize=search_gridsize,
-        search_margin=search_margin,
-        auto_dock_num_cores=auto_dock_num_cores,
-        out_folder=out_folder,
-        num_cores=num_cores,
-    )
-
-    return vina_dock.run()
-
-
-@function_tool
-def run_vina_dock_gpu(
-    input_data: str,
-    receptor: str,
-    complex: str = None,
-    mode: str = "production",
-    docking_centers: Optional[List[float]] = None,
-    docking_centers_file: str = None,
-    num_pockets: int = 1,
-    num_poses: int = 5,
-    minimized_dock: bool = False,
-    search_gridsize: float = 25.0,
-    search_margin: float = 5.0,
-    out_folder: str = "out_folder",
-    num_gpus: int = get_gpu_count(),
+    auto_dock_num_cores: int = 1,
+    # GPU (vina_gpu, unidock) specific
+    num_gpus: Optional[int] = None,
     gpu_ids: Optional[List[int]] = None,
+    # UniDock specific (passed through, None = use unidock defaults)
+    scoring: Optional[str] = None,
+    exhaustiveness: Optional[int] = None,
+    search_mode: Optional[str] = None,
+    energy_range: Optional[float] = None,
+    min_rmsd: Optional[float] = None,
+    spacing: Optional[float] = None,
+    seed: Optional[int] = None,
+    refine_step: Optional[int] = None,
+    max_evals: Optional[int] = None,
+    max_step: Optional[int] = None,
+    max_gpu_memory: Optional[int] = None,
+    verbosity: Optional[int] = None,
+    cpu: Optional[int] = None,
 ) -> str:
     """
-    Run GPU-accelerated molecular docking (search or production mode).
+    Run molecular docking with selectable backend engine.
 
-    This is the GPU-accelerated version using AutoDock-Vina-GPU-2-1 for significantly
-    faster docking of large ligand libraries. The GPU version processes all ligands in
-    batch mode per pocket, making it ideal for high-throughput virtual screening.
+    Supports three backends:
+    - "vina": CPU-based AutoDock Vina (parallelized across CPU cores)
+    - "vina_gpu": GPU-accelerated AutoDock-Vina-GPU-2-1 (batch processing per pocket)
+    - "unidock": UniDock GPU engine with extensive tuning options
 
-    Supports both search mode (discover binding sites) and production mode (dock at known sites).
+    All backends support both search mode (discover binding sites) and production mode
+    (dock at known sites). Parameters not applicable to the selected backend are ignored.
 
     Args:
-        input_data: Path to CSV file containing ligand dataset with ID and PDBQT_File columns.
-            All ligands must be pre-prepared as PDBQT files in the preprocessing module.
-        receptor: Path to receptor protein structure file (PDB or PDBQT format).
-            If PDB format is provided, it will be automatically converted to PDBQT.
-        complex: Optional. Path to complex structure with bound ligand for automatic center
-            detection. Format: "filename,resname1[,resname2,...]".
-            Example: "complex.pdb,LIG1,LIG2". If provided, overrides docking_centers. Default: None
-        mode: Docking mode: "production" (dock at known sites) or "search" (discover binding sites).
-            Default: "production"
-        docking_centers: Optional. Manual specification of binding site coordinates in Angstroms.
-            Format: [x1, y1, z1, x2, y2, z2, ...] for multiple sites.
-            Example: [10.5, 15.2, 8.7, -5.0, 3.2, 12.1]. Ignored if complex or docking_centers_file
-            is provided. Default: None
-        docking_centers_file: Optional. Path to CSV file with docking center coordinates,
-            typically from run_find_pocket output (docking_centers.csv). If provided,
-            overrides docking_centers and num_pockets. Default: None
-        num_pockets: Number of binding sites to dock into. Default: 1
-        num_poses: Number of binding poses to generate per ligand per site. Default: 5
-        minimized_dock: If True, uses a fixed 5Å docking box (only for very precise
-            binding sites with small ligands <300 Da). For production docking, typically use False.
-            Default: False
-        search_gridsize: Grid spacing for search mode OR manual box size for production (default: 25.0).
-            - In search mode: Spacing between grid points for exhaustive search
-            - In production mode: If provided, uses this as fixed box size for all ligands
-        search_margin: Margin around receptor bounds for search mode (default: 5.0)
-        out_folder: Output directory for all docking results. Default: "out_folder"
-        num_gpus: Number of GPUs to use for parallel docking across multiple pockets.
-            Each GPU processes one pocket at a time. Default: 1
-        gpu_ids: Optional. Specific GPU device IDs to use (e.g., [0, 1, 2, 3]).
-            If None, uses GPUs 0 to num_gpus-1. Default: None
+        input_data: Path to CSV file with ID and PDBQT_File columns.
+            All ligands must be pre-prepared as PDBQT files.
+        receptor: Path to receptor file (PDB or PDBQT). PDB is auto-converted to PDBQT.
+        backend: Docking engine to use. Options:
+            - "vina": CPU-based, good for small datasets or when GPUs unavailable
+            - "vina_gpu": GPU-accelerated, ideal for large ligand libraries
+            - "unidock": GPU-accelerated with advanced tuning options
+            Default: "vina"
+
+        Common parameters (all backends):
+            mode: "search" (discover binding sites) or "production" (dock at known sites).
+                Default: "production"
+            complex: Complex structure for auto center detection.
+                Format: "file.pdb,SEL1,SEL2" where each selector is:
+                - "RES" (must be unique in complex)
+                - "RES:CHAIN"
+                - "RES:CHAIN:RESSEQ" (optional insertion code, e.g., 123A)
+            docking_centers: Manual coordinates [x1,y1,z1, x2,y2,z2, ...] in Angstroms.
+            docking_centers_file: CSV file with docking centers (from run_find_pocket).
+            num_pockets: Number of binding sites. Default: 1
+            num_poses: Poses per ligand per site. Default: 5
+            minimized_dock: Use small 5Å box for precise sites. Default: False
+            search_gridsize: Box size in Angstroms. Default: 25.0
+            production_gridsize: Optional production-mode box size in Angstroms.
+                When provided, overrides backend defaults for production mode.
+            lock_grid_center: If True (default), keep the user-defined docking center
+                fixed after pre-minimization. Set False to allow recentering around
+                minimized ligand coordinates.
+            search_margin: Margin around receptor bounds for search. Default: 5.0
+            out_folder: Output directory. Default: "out_folder"
+            log_file: Optional path for this run's log file (e.g. agent_data/logs/adams_pipeline_run_<run_name>.log).
+                If set, all log output for this run is written here. Use for comparison runs so each run has its own log.
+            pH: float: pH value for receptor protonation state (default: 7.4). Used when converting
+                PDB receptor to PDBQT format. Must match the pH used in preprocessing (run_clean_pdb)
+                to ensure protonation consistency across the pipeline.
+            charge_model: Charge model for receptor PDBQT conversion (default: "gasteiger"). Must match
+                ligand preparation (run_smiles_to_pdbqt / convert_3d_to_pdbqt). Use same value for both.
+
+        CPU backend (vina) specific:
+            num_cores: Parallel CPU cores. None = auto-detect.
+            auto_dock_num_cores: Cores per Vina subprocess. Default: 1
+
+        GPU backends (vina_gpu, unidock) specific:
+            num_gpus: Number of GPUs to use. None = auto-detect.
+            gpu_ids: Specific GPU IDs, e.g. [0, 1]. None = use 0 to num_gpus-1.
+
+        UniDock specific (backend="unidock", None = use unidock defaults):
+            scoring: Scoring function "ad4", "vina", or "vinardo". Default: vina
+            exhaustiveness: Global search depth. Default: 8
+            search_mode: Preset "fast", "balance", or "detail"
+            energy_range: Max energy difference in kcal/mol. Default: 3
+            min_rmsd: Min RMSD between poses in Å. Default: 1
+            spacing: Grid spacing in Å. Default: 0.375
+            seed: Random seed for reproducibility
+            refine_step: Refinement steps. Default: 3
+            max_evals: Max MC evaluations (0 = heuristic)
+            max_step: Max MC steps (0 = heuristic)
+            max_gpu_memory: GPU memory limit in bytes (0 = all)
+            verbosity: Output level 0/1/2. Default: 1
+            cpu: CPU count for unidock (0 = auto)
 
     Returns:
-        str: Path to the output CSV file containing docking results:
-             - Search mode: {out_folder}/docking/search/summaries/best_docking_centers.csv
-             - Production mode: {out_folder}/docking/production/summaries/production_docking_results.csv
+        str: Path to output CSV:
+            - Search: {out_folder}/docking/search/summaries/best_search_docking_centers.csv
+            - Production: {out_folder}/docking/production/summaries/production_docking_results.csv
     """
-    vina_dock_gpu = VinaDockGPU(
-        input_data=input_data,
-        receptor=receptor,
-        complex=complex,
-        mode=mode,
-        num_pockets=num_pockets,
-        num_poses=num_poses,
-        docking_centers=docking_centers,
-        docking_centers_file=docking_centers_file,
-        minimized_dock=minimized_dock,
-        search_gridsize=search_gridsize,
-        search_margin=search_margin,
-        out_folder=out_folder,
-        num_gpus=num_gpus,
-        gpu_ids=gpu_ids,
-    )
+    if log_file:
+        setup_logger(log_file=log_file)
 
-    return vina_dock_gpu.run()
+    charge_model = validate_charge_model(charge_model)
+
+    # Validate backend early
+    SUPPORTED_BACKENDS = {"vina", "vina_gpu", "unidock"}
+    if backend not in SUPPORTED_BACKENDS:
+        raise ValueError(
+            f"Unsupported backend: {backend}. "
+            f"Choose from: {', '.join(sorted(SUPPORTED_BACKENDS))}"
+        )
+
+    # Validate and set defaults (backend-specific; backends also default num_cores/num_gpus when None)
+    # Treat 0 as "use default" so callers (e.g. LLM tools) passing 0 get backend default instead of error
+    if production_gridsize is not None and production_gridsize <= 0:
+        production_gridsize = None
+
+    if backend == "vina":
+        if num_cores is not None and num_cores <= 0:
+            raise ValueError(
+                f"num_cores must be None (for auto-detection) or positive, got {num_cores}"
+            )
+    elif backend in ("vina_gpu", "unidock"):
+        available_gpus = get_gpu_count()
+        if num_gpus is None:
+            num_gpus = available_gpus
+            if num_gpus == 0:
+                raise ValueError(
+                    f"GPU backend '{backend}' requires GPUs, but none were detected. "
+                    f"Please either:\n"
+                    f"  1. Use CPU backend 'vina' instead, or\n"
+                    f"  2. Ensure CUDA GPUs are available (check with 'nvidia-smi')"
+                )
+        elif num_gpus <= 0:
+            raise ValueError(
+                f"num_gpus must be positive, got: {num_gpus}"
+            )
+        if gpu_ids is not None:
+            if len(gpu_ids) != num_gpus:
+                raise ValueError(
+                    f"gpu_ids length ({len(gpu_ids)}) must match num_gpus ({num_gpus})"
+                )
+            if any(gid < 0 for gid in gpu_ids):
+                raise ValueError(f"gpu_ids must be non-negative, got: {gpu_ids}")
+
+    # Build kwargs, excluding 'backend' (passed separately to DockingPipeline)
+    kwargs = {
+        "input_data": input_data,
+        "receptor": receptor,
+        "complex": complex,
+        "mode": mode,
+        "num_pockets": num_pockets,
+        "num_poses": num_poses,
+        "docking_centers": docking_centers,
+        "docking_centers_file": docking_centers_file,
+        "minimized_dock": minimized_dock,
+        "search_gridsize": search_gridsize,
+        "production_gridsize": production_gridsize,
+        "lock_grid_center": lock_grid_center,
+        "search_margin": search_margin,
+        "out_folder": out_folder,
+        "pH": pH,
+        "charge_model": charge_model,
+        "num_cores": num_cores,
+        "auto_dock_num_cores": auto_dock_num_cores,
+        "num_gpus": num_gpus,
+        "gpu_ids": gpu_ids,
+        "scoring": scoring,
+        "exhaustiveness": exhaustiveness,
+        "search_mode": search_mode,
+        "energy_range": energy_range,
+        "min_rmsd": min_rmsd,
+        "spacing": spacing,
+        "seed": seed,
+        "refine_step": refine_step,
+        "max_evals": max_evals,
+        "max_step": max_step,
+        "max_gpu_memory": max_gpu_memory,
+        "verbosity": verbosity,
+        "cpu": cpu,
+    }
+
+    try:
+        pipeline = DockingPipeline(backend=backend, **kwargs)
+        output_csv = pipeline.run()
+        
+        # Validate that output file was created
+        if not os.path.exists(output_csv):
+            raise RuntimeError(
+                f"Docking pipeline completed but output file not found: {output_csv}"
+            )
+        return output_csv
+    except ValueError as e:
+        from ...utils.multiprocessing_utils import is_spawn_error
+
+        if is_spawn_error(e):
+            raise RuntimeError(
+                f"Multiprocessing spawn error (backend={backend}): {e}"
+            ) from e
+        raise ValueError(
+            f"Docking pipeline configuration error (backend={backend}): {e}"
+        ) from e
+    except FileNotFoundError as e:
+        # Re-raise with more context
+        raise FileNotFoundError(
+            f"Docking pipeline file error (backend={backend}): {e}"
+        ) from e
+    except Exception as e:
+        # Catch-all for unexpected errors
+        logger = get_logger()
+        logger.error(f"Docking pipeline failed (backend={backend}): {e}", exc_info=True)
+        raise RuntimeError(
+            f"Docking pipeline execution failed (backend={backend}): {e}"
+        ) from e
 
 
 @function_tool
@@ -257,11 +314,20 @@ def run_find_pocket(
         str: Path to docking_centers.csv file containing top N binding pocket coordinates
              at {out_path}/docking/search/summaries/docking_centers.csv
     """
-    find_pocket = FindPocket(
-        input_file=input_file, affinity_cutoff=affinity_cutoff, out_path=out_path
-    )
-
-    find_pocket.run()
+    try:
+        find_pocket = FindPocket(
+            input_file=input_file, affinity_cutoff=affinity_cutoff, out_path=out_path
+        )
+        find_pocket.run()
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"FindPocket file error: {e}. "
+            f"Make sure search docking completed successfully."
+        ) from e
+    except Exception as e:
+        logger = get_logger()
+        logger.error(f"FindPocket failed: {e}", exc_info=True)
+        raise RuntimeError(f"FindPocket execution failed: {e}") from e
 
     # Extract top N clusters
     dir_structure = setup_docking_dirs(out_path, mode="search")
@@ -275,15 +341,27 @@ def run_find_pocket(
     if os.path.exists(cluster_summary_path):
         # Read cluster summary and take top N clusters (assumes sorted by affinity)
         df = pd.read_csv(cluster_summary_path)
+        if df.empty:
+            raise ValueError(
+                f"Cluster summary is empty. No binding pockets found above affinity cutoff ({affinity_cutoff} kcal/mol). "
+                f"Try lowering the affinity_cutoff or check that search docking produced valid results."
+            )
         top_clusters = df.head(top_n_clusters)
         top_clusters.to_csv(docking_centers_path, index=False)
+        
+        if not os.path.exists(docking_centers_path):
+            raise RuntimeError(
+                f"Failed to create docking_centers.csv at {docking_centers_path}"
+            )
         logger = get_logger()
         logger.info(
             f"Extracted top {top_n_clusters} clusters to {docking_centers_path}"
         )
     else:
-        logger = get_logger()
-        logger.warning(f"cluster_summary.csv not found at {cluster_summary_path}")
+        raise FileNotFoundError(
+            f"Cluster summary not found at {cluster_summary_path}. "
+            f"FindPocket may have failed. Check the logs for errors."
+        )
 
     return docking_centers_path
 
@@ -291,23 +369,34 @@ def run_find_pocket(
 prompt_path = Path(__file__).parent / "docking_agent_prompt.md"
 system_prompt = prompt_path.read_text()
 
-docking_agent = Agent(
-    model="gpt-5.2",
-    name="Molecular Docking Agent",
-    tools=[
-        read_reference_file,
-        file_parser_agent.as_tool(
-            tool_name="file_parser_agent",
-            tool_description=(
-                "An agent that extracts structured statistics from docking results to enable parameter extraction. "
-                "Use this agent to analyze docking results CSV files to extract affinity statistics, pose counts, "
-                "and pocket analysis. Can help determine optimal parameters for MD based on docking results."
-            ),
-        ),
-        generate_3d_conformers,
-        run_vina_dock,
-        run_vina_dock_gpu,
-        run_find_pocket,
-    ],
-    instructions=system_prompt,
-)
+_docking_agent = None
+_docking_model = None
+
+
+def get_docking_agent():
+    global _docking_agent, _docking_model
+    current_model = get_current_model_name()
+    if _docking_agent is None or _docking_model != current_model:
+        _docking_agent = Agent(
+            model=get_resolved_model(),
+            name="Molecular Docking Agent",
+            tools=[
+                read_reference_file,
+                read_plan_document,
+                append_to_plan_section,
+                contribute_stage_to_plan,
+                get_file_parser_agent().as_tool(
+                    tool_name="file_parser_agent",
+                    tool_description=(
+                        "An agent that extracts structured statistics from docking results. "
+                        "Use this agent to analyze docking results CSV files to extract affinity statistics, pose counts, "
+                        "and pocket analysis. Use the returned evidence for downstream reasoning rather than asking it to choose parameters."
+                    ),
+                ),
+                run_docking,
+                run_find_pocket,
+            ],
+            instructions=system_prompt,
+        )
+        _docking_model = current_model
+    return _docking_agent

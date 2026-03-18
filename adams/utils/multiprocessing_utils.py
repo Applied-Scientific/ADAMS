@@ -37,9 +37,12 @@ Usage:
 """
 
 import atexit
+import gc
 import logging
 import logging.handlers
 import multiprocessing as mp
+import os
+import threading
 
 # Global spawn context - safer than fork, will be default in Python 3.14+
 # Spawn starts a fresh Python interpreter, avoiding fork hazards like:
@@ -76,6 +79,85 @@ Process = _spawn_ctx.Process
 Pool = _spawn_ctx.Pool
 Queue = _spawn_ctx.Queue
 cpu_count = mp.cpu_count
+
+
+def is_spawn_error(exc: Exception) -> bool:
+    """Return True when *exc* is the ``bad value(s) in fds_to_keep`` spawn error."""
+    return isinstance(exc, (ValueError, OSError)) and "fds_to_keep" in str(exc)
+
+
+def can_start_multiprocessing() -> bool:
+    """Return False only when multiprocessing is explicitly disabled.
+
+    Historically we also blocked non-main-thread callers to avoid spawn FD
+    races ("bad value(s) in fds_to_keep"). The spawn safety patch below now
+    serializes Process.start() and sanitizes passfds, so thread affinity is no
+    longer used as a hard gate for multiprocessing.
+    """
+    if os.environ.get("ADAMS_DISABLE_MULTIPROCESS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Root-cause fix for "ValueError: bad value(s) in fds_to_keep"
+#
+# When process args contain a Queue, pickling registers the Queue's pipe FDs
+# via duplicate_for_child().  If a TUI thread or GC finalizer closed one of
+# those FDs *before* spawn, os.pipe() inside _launch can reuse the same FD
+# number, creating a duplicate in the fds_to_keep list.  fork_exec requires
+# strictly ascending FDs and rejects duplicates.
+#
+# Two-layer fix:
+#   1. Suspend GC + serialize spawns during Process.start() — prevents
+#      finalizers from closing FDs during the spawn window.
+#   2. Sanitize the FD list in spawnv_passfds right before fork_exec —
+#      filters out negative, closed, and duplicate FDs that were already
+#      stale before spawn was called.
+# ---------------------------------------------------------------------------
+
+_spawn_lock = threading.Lock()
+_original_process_start = _spawn_ctx.Process.start
+
+
+def _safe_process_start(self):
+    with _spawn_lock:
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            _original_process_start(self)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+
+_spawn_ctx.Process.start = _safe_process_start
+
+import multiprocessing.util as _mp_util
+
+_original_spawnv_passfds = _mp_util.spawnv_passfds
+
+
+def _safe_spawnv_passfds(path, args, passfds):
+    seen = set()
+    valid = []
+    for fd in sorted(int(fd) for fd in passfds):
+        if fd < 0 or fd in seen:
+            continue
+        try:
+            os.fstat(fd)
+        except OSError:
+            continue
+        seen.add(fd)
+        valid.append(fd)
+    return _original_spawnv_passfds(path, args, valid)
+
+
+_mp_util.spawnv_passfds = _safe_spawnv_passfds
 
 
 def setup_worker_logging(main_logger: logging.Logger) -> mp.Queue:

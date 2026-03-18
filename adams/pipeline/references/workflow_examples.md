@@ -25,10 +25,15 @@ These principles apply to ALL stage transitions (preprocessing → docking → M
   3. Store these paths for use in the next stage
   4. Use extracted paths (not reconstructed paths) when calling next agent
 - **Key Paths to Extract**:
-  - From preprocessing: cleaned receptor path, processed ligand CSV path
+  - From preprocessing: cleaned receptor path; **mapping CSV path** (docking_ready_ligands.csv from run_smiles_to_pdbqt or run_standardize_ligand_data for 3D) — use as **input_data** for docking
   - From docking: production docking results CSV path, docking centers CSV path
   - From MD: pose directories, report paths (for mid-pipeline resumes)
 - **Why**: Agents return exact paths - reconstructing paths can lead to errors
+
+### Principle 2b: Docking Input Readiness
+- **CRITICAL**: Docking requires ligand input that is **docking-ready**: a CSV that includes a **PDBQT_File** column (paths to PDBQT files). Docking cannot use a table that only has SMILES/ID—ligands must be prepared as 3D conformers and PDBQT files first.
+- **When preprocessing runs first**: Ensure the preprocessing stage produces a PDBQT-ready table (e.g. by including conformer generation and PDBQT writing). Pass the path to that table (or the docking agent's equivalent) when calling the docking agent. Do not pass a cleaned/filtered ligand CSV that lacks a PDBQT_File column and assume docking can proceed.
+- **When a step is reported incomplete**: If logs or tool output report a pipeline step as "incomplete", treat it as a signal that a required prior step (e.g. ligand/conformer preparation) may have been skipped or failed. Ensure the full sequence—including any conformer/PDBQT step—has been run before retrying.
 
 ### Principle 3: Complete Parameter Provision
 - **CRITICAL**: Always provide ALL required parameters in a SINGLE agent call
@@ -66,6 +71,9 @@ These principles apply to ALL stage transitions (preprocessing → docking → M
 - **Good**: "Clean the receptor at /path/to/receptor.pdb and process ligands from /path/to/ligands.csv. Use /path/to/outputs/run_xxx as the outpath for all preprocessing operations."
 - **Bad**: "run_clean_pdb(input_pdb='/path/to/receptor.pdb', outpath='/path/to/outputs/run_xxx')"
 - **Why**: Agents parse natural language and extract parameters themselves
+
+### Docking engines available
+- The pipeline's docking step supports **three** engines (backend parameter): **AutoDock Vina (CPU)** (`vina`), **Vina-GPU (CUDA)** (`vina_gpu`), and **UniDock (GPU)** (`unidock`). When the user or controller requests "all docking engines" or engine/speed comparison, run the same docking task with each engine in separate runs (distinct out_folder per engine, e.g. compare_vina, compare_vinagpu, compare_unidock) so results and timings can be compared.
 
 ## Example 1: Complete End-to-End Workflow (CPU)
 
@@ -269,7 +277,7 @@ When starting mid-pipeline, include these parameters as needed:
 
 - **For Production Docking entry** (skip search): Provide `docking_centers=({x} {y} {z})` OR `docking_centers_file=/path/to/centers.csv`
 - **For ProteinTopology entry** (skip preprocessing/docking): Provide cleaned `receptor`, `docking_csv` (docking results), and `ligand_input`
-- **For LigPrepare entry** (skip ProteinTopology): Provide `protein_gro=/path/to/protein.gro, protein_top=/path/to/topol.top`
+- **For LigPrepare entry** (skip ProteinTopology): Provide `protein_gro=/path/to/protein.gro, protein_top=/path/to/topol.top`. Also pass `water_model=` (e.g. `tip3p`, `spc`) to match the topology so solvation is consistent.
 - **For Gro entry** (skip LigPrepare): Provide `pose_dirs=pose1,pose2,pose3` (comma-separated list of pose directory names)
 - **For StabilityAnalysis entry** (skip Gro): Provide `pose_dirs_analysis=pose1,pose2,pose3` (comma-separated list)
 - **For external docking results**: Ensure user's docking CSV has `pdbqt_path` column if PDBQT files are in non-standard locations

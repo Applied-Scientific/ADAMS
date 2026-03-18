@@ -16,6 +16,7 @@ Design principles:
 
 import signal
 import subprocess
+import threading
 from functools import wraps
 from typing import Any, Callable, Optional
 
@@ -114,7 +115,7 @@ _sigint_received = False
 _original_sigint_handler = None
 
 
-def setup_sigint_handler():
+def setup_sigint_handler() -> bool:
     """
     Install SIGINT (Ctrl+C) handler for clean shutdown.
 
@@ -143,7 +144,20 @@ def setup_sigint_handler():
         raise KeyboardInterrupt("SIGINT received")
 
     # Save original handler in case we need to restore it
+    # No-op when already installed
+    if _original_sigint_handler is not None:
+        return True
+
+    # Python only allows signal handlers from main thread
+    if threading.current_thread() is not threading.main_thread():
+        logger = get_logger()
+        logger.warning(
+            "setup_sigint_handler called outside main thread; skipping SIGINT handler install."
+        )
+        return False
+
     _original_sigint_handler = signal.signal(signal.SIGINT, handler)
+    return True
 
 
 def is_sigint_pending() -> bool:
@@ -172,7 +186,10 @@ def reset_sigint_handler():
     """
     global _sigint_received, _original_sigint_handler
     _sigint_received = False
-    if _original_sigint_handler is not None:
+    if (
+        threading.current_thread() is threading.main_thread()
+        and _original_sigint_handler is not None
+    ):
         signal.signal(signal.SIGINT, _original_sigint_handler)
         _original_sigint_handler = None
 
@@ -495,13 +512,16 @@ def safe_vina_operation(operation_name: str = "Vina operation"):
 # ============================================================================
 
 
-def safe_meeko_preparation(mol: Any, ligand_id: str) -> Optional[tuple]:
+def safe_meeko_preparation(
+    mol: Any, ligand_id: str, charge_model: str = "gasteiger"
+) -> Optional[tuple]:
     """
     Prepare ligand PDBQT with Meeko with error handling.
 
     Args:
         mol: RDKit Mol object
         ligand_id: Identifier for the ligand
+        charge_model: Meeko partial charge model (default: "gasteiger"). Must match receptor.
 
     Returns:
         Tuple of (pdbqt_string, is_ok) or None if preparation failed
@@ -519,7 +539,7 @@ def safe_meeko_preparation(mol: Any, ligand_id: str) -> Optional[tuple]:
     logger = get_logger()
 
     try:
-        ligprep = MoleculePreparation()
+        ligprep = MoleculePreparation(charge_model=charge_model)
         lig_setup = ligprep.prepare(mol)
 
         lig_string = None

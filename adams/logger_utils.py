@@ -157,8 +157,7 @@ def setup_logger(log_file: str = None, log_level: int = logging.INFO) -> logging
 
         # Create default log file with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = str(agent_data_logs / f"adams_pipeline_{timestamp}.log")
-
+        log_file = str(agent_data_logs / f"adams_pipeline_run_{timestamp}.log")
     # Ensure log directory exists
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)

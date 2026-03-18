@@ -9,7 +9,7 @@ overload from loading entire trace files.
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ...path_config import get_subdirectory
 

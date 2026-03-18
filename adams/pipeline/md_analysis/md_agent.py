@@ -1,55 +1,142 @@
 """
-MD Analysis Agent - Module Execution Order and Dependencies
+MD analysis agent tools.
 
-This module provides function tools for the MD stability analysis pipeline.
-The agent must execute steps in the strict sequence defined below, passing
-the file_paths dictionary between steps.
+Agent-facing execution is unified through workflow-aware tools:
+    - run_build_membrane_system_openmm
+    - run_md_prepare
+    - run_md_simulation
+    - run_md_analysis
 
-MODULE EXECUTION ORDER (strict sequence):
-    1. build_file_paths - Initialize file_paths dictionary
-    2. discover_paths - Discover GROMACS/AmberTools paths and merge into file_paths
-    3. run_protein_topology - Prepare protein topology (pdb2gmx)
-    4. run_lig_prepare - Prepare ligands and combine with protein
-    5. run_gro - Run MD simulations (NVT, NPT, production)
-    6. run_stability_analysis - Analyze trajectories and generate reports
-
-MODULE DEPENDENCIES:
-
-    run_protein_topology:
-        Inputs: protein_file, protein_dir, gromacs_path, ambertools_path
-        Outputs: protein_gro, protein_top, posre_itp
-
-    run_lig_prepare:
-        Inputs: docking_csv, ligand_input, protein_gro, protein_top, poses_dir,
-                gromacs_path, ambertools_path
-        Outputs: poses_dir (updated with prepared poses)
-
-    run_gro:
-        Inputs: poses_dir, gromacs_path, ambertools_path
-        Outputs: poses_dir (updated with MD-completed poses)
-
-    run_stability_analysis:
-        Inputs: poses_dir, reports_dir, gromacs_path, ambertools_path
-        Outputs: summary_report, brief_report
-
-WORKFLOW:
-    The file_paths dictionary is the single source of truth for all paths.
-    Each module function requires file_paths as the first parameter and returns
-    an updated file_paths dictionary that must be passed to the next step.
+Each accepts workflow="auto|soluble|membrane". In auto mode, membrane keys in
+file_paths trigger membrane routing; otherwise soluble routing is used.
 """
 
+import os
 from pathlib import Path
-from typing import TypedDict
+from typing import List, Optional, TypedDict
 
 from agents import Agent, function_tool
 
-from ...helper_agents.file_parser.file_parser_agent import file_parser_agent
+from ...helper_agents.file_parser.file_parser_agent import get_file_parser_agent
+from ...model_config import get_current_model_name, get_resolved_model
+from ...user_plan_utils import (
+    append_to_plan_section,
+    contribute_stage_to_plan,
+    read_plan_document,
+)
 from ..references.reference_file_reader import read_reference_file
 from .agent_utils import build_file_paths, discover_paths
-from .lig_prepare import LigPrepare
-from .protein_topology import ProteinTopology
-from .run_gro import Gro
-from .stability_analysis import StabilityAnalysis
+from .prepare.lig_prepare import LigPrepare
+from .prepare.membrane_prep import MembranePrep
+from .prepare.openmm_membrane_builder import OpenMMMembraneBuilder
+from .prepare.protein_topology import ProteinTopology
+from .simulate.soluble_md import SolubleMd
+from .simulate.membrane_md import MembraneMd
+from .analyze.stability_analysis import StabilityAnalysis
+from .analyze.membrane_analysis import MembraneAnalysis
+from .shared import (
+    GromppWarningPolicy,
+    get_approved_grompp_warnings_path,
+    load_approved_grompp_warnings,
+)
+
+
+def _make_grompp_policy(approved_grompp_warnings: list = None) -> GromppWarningPolicy:
+    """Create a ``GromppWarningPolicy`` from agent-supplied fingerprints."""
+    return GromppWarningPolicy(
+        approved=set(approved_grompp_warnings or []),
+        descriptions={},
+    )
+
+
+def _attach_policy_report(result: dict, policy: GromppWarningPolicy) -> dict:
+    """If any pre-approved warnings were used, record them in *result*."""
+    if policy._approved:
+        result["pre_approved_grompp_warnings_used"] = (
+            policy.get_approved_with_descriptions()
+        )
+    return result
+
+
+def _detect_workflow(file_paths: "FilePathsDict", workflow: str = "auto") -> str:
+    """
+    Resolve workflow mode for unified agent tools.
+
+    Rules:
+      - explicit workflow ("soluble" or "membrane") always wins
+      - auto selects membrane when membrane-specific keys are present
+      - otherwise defaults to soluble
+    """
+    normalized = (workflow or "auto").strip().lower()
+    if normalized in {"soluble", "membrane"}:
+        return normalized
+    if normalized != "auto":
+        raise ValueError(
+            f"Invalid workflow '{workflow}'. Expected one of: auto, soluble, membrane."
+        )
+
+    membrane_markers = (
+        "membrane_build",
+        "membrane_system_gro",
+        "membrane_system_top",
+        "membrane_dir",
+        "membrane_min_gro",
+        "membrane_top",
+        "membrane_ndx",
+        "membrane_md_xtc",
+    )
+    if any(file_paths.get(key) for key in membrane_markers):
+        return "membrane"
+    return "soluble"
+
+
+def _resolve_forcefield_preset(forcefield_preset: Optional[str]) -> Optional[str]:
+    """
+    Normalize forcefield_preset and map "auto" to a single default preset.
+
+    Explicit presets are passed through unchanged.
+    """
+    normalized = (
+        forcefield_preset.strip().lower()
+        if isinstance(forcefield_preset, str) and forcefield_preset.strip()
+        else None
+    )
+    if normalized == "auto":
+        return "ff99sb_ildn_tip3p"
+    return normalized
+
+
+def _format_stored_grompp_approvals_for_prompt() -> str:
+    """
+    Build a system-prompt section listing historically approved grompp warnings
+    from agent_data/memory/approved_grompp_warnings.json. The agent uses this
+    to decide what to pass in approved_grompp_warnings each call (adaptive to
+    current user intent; user may revoke any approval).
+    """
+    path = get_approved_grompp_warnings_path()
+    loaded = load_approved_grompp_warnings(path) if path else {}
+    fps = loaded.get("approved_fingerprints", set())
+    desc = loaded.get("descriptions", {})
+    if not fps:
+        return (
+            "**STORED GROMPP WARNING APPROVALS (from previous sessions):**\n"
+            "- None stored. When the user approves warnings, they are saved to "
+            "agent_data/memory/approved_grompp_warnings.json and will appear here on the next run.\n"
+        )
+    lines = [
+        "**STORED GROMPP WARNING APPROVALS (from previous sessions):**",
+        "The following warnings were previously approved and are stored in "
+        "agent_data/memory/approved_grompp_warnings.json. Pass only the fingerprints "
+        "that match the user's *current* intent in approved_grompp_warnings when calling "
+        "run_md_prepare or run_md_simulation; the user may revoke approval for any warning.",
+        "",
+    ]
+    for fp in sorted(fps):
+        d = desc.get(fp, "(no description)")
+        lines.append(f"- Fingerprint: {fp!r}")
+        lines.append(f"  Description: {d}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 class FilePathsDict(TypedDict, total=False):
@@ -63,217 +150,390 @@ class FilePathsDict(TypedDict, total=False):
     protein_gro: str
     protein_top: str
     posre_itp: str
+    water_model: str
     docking_csv: str
     ligand_input: str
     gromacs_path: str
     ambertools_path: str
-    gromacs_binary_type: str  # Auto-detected by discover_paths
+    gromacs_binary_type: str
     summary_report: str
     brief_report: str
+    workflow_used: str
+    pose_manifest: str
+    prepared_poses: List[str]
+    prepared_pose_count: int
+    failed_pose_count: int
+    dropped_parent_ids: List[str]
+    lig_prepare_summary_path: str
+    lig_prepare_failures_path: str
+    md_completed_poses: List[str]
+    md_failed_poses: List[str]
+    md_runtime_summary: str
+
+    membrane_dir: str
+    membrane_system_gro: str
+    membrane_system_top: str
+    membrane_system_gro_work: str
+    membrane_min_gro: str
+    membrane_top: str
+    membrane_ndx: str
+    membrane_posre: str
+    membrane_posre_files: List[str]
+    membrane_posre_variants: List[str]
+    membrane_normalization_report: str
+    membrane_build: bool
+    force_rebuild: bool
+    membrane_source: str
+    membrane_build_report: str
+    membrane_orientation_report: str
+    orientation_policy: str
+    membrane_lipid_type: str
+    membrane_padding_nm: float
+    membrane_ionic_strength_m: float
+    membrane_positive_ion: str
+    membrane_negative_ion: str
+    membrane_md_tpr: str
+    membrane_md_xtc: str
+    membrane_md_gro: str
+    membrane_reports_dir: str
+    membrane_analysis_report: str
+    membrane_rmsd_xvg: str
+    membrane_density_xvg: str
+    membrane_runtime_summary: str
 
 
 @function_tool
-def run_protein_topology(
+def run_build_membrane_system_openmm(
     file_paths: FilePathsDict,
-    forcefield: str = "amber03",
-    water_model: str = "tip3p",
-    ignore_hydrogens: bool = True,
+    lipid_type: str = "POPC",
+    minimum_padding_nm: float = 2.0,
+    ionic_strength_m: float = 0.15,
+    positive_ion: str = "K+",
+    negative_ion: str = "Cl-",
+    orientation_policy: str = "warn",
+    force_rebuild: bool = False,
 ) -> FilePathsDict:
     """
-    Run protein topology preparation step.
+    Build membrane GRO/TOP from protein input using OpenMM.
 
-    This function prepares protein structure for MD simulation by converting PDB to GROMACS format
-    using pdb2gmx. It generates protein.gro, topol.top, and posre.itp files.
-
-    Args:
-        file_paths: Required dict containing file paths. Must include:
-            - protein_file: Path to input protein PDB file
-            - protein_dir: Directory for output files
-            - gromacs_path: Path to GROMACS installation
-            - ambertools_path: Path to AmberTools installation
-            - gromacs_binary_type: Auto-detected binary type (from discover_paths)
-        forcefield: GROMACS forcefield (default: "amber03")
-        water_model: Water model for pdb2gmx (default: "tip3p")
-        ignore_hydrogens: Whether to ignore hydrogens (default: True)
-
-    Returns:
-        dict: Updated file_paths dictionary with protein_gro, protein_top, and posre_itp paths
+    If valid pre-built membrane_system_gro + membrane_system_top are already
+    provided and force_rebuild=False, pre-built files are kept.
     """
-    protein_topology = ProteinTopology(
+    builder = OpenMMMembraneBuilder(
         file_paths=file_paths,
-        forcefield=forcefield,
-        water_model=water_model,
-        ignore_hydrogens=ignore_hydrogens,
+        lipid_type=lipid_type,
+        minimum_padding_nm=minimum_padding_nm,
+        ionic_strength_m=ionic_strength_m,
+        positive_ion=positive_ion,
+        negative_ion=negative_ion,
+        orientation_policy=orientation_policy,
     )
+    return builder.run(force_rebuild=force_rebuild)
 
-    return protein_topology.run()
 
-
-@function_tool
-def run_lig_prepare(
+def run_md_prepare_impl(
     file_paths: FilePathsDict,
-    tops: int = 50,
+    workflow: str = "auto",
+    forcefield: str = "amber99sb-ildn",
+    water_model: Optional[str] = None,
+    forcefield_preset: str = None,
+    ignore_hydrogens: bool = True,
+    tops: Optional[int] = 3,
+    selection_scope: str = "per_grid",
     num_cores: int = 0,
-    num_gpus: int = 0,
+    num_gpus: int = -1,
+    max_jobs: int = 0,
     charge_type: str = "bcc",
+    atom_type: str = "gaff2",
+    retry_with_gas_on_failure: bool = False,
     water_margin: float = 1.0,
     ion_conc: float = 0.15,
     pname: str = "K",
     nname: str = "CL",
+    approved_grompp_warnings: Optional[List[str]] = None,
 ) -> FilePathsDict:
     """
-    Run ligand preparation step.
+    Unified preparation interface for both workflows.
 
-    This function selects top docking ligands and prepares them for MD simulation by combining
-    with protein, solvating, adding ions, and minimizing.
+    - soluble: runs ProteinTopology (if needed) then LigPrepare
+    - membrane: runs MembranePrep
+    - selection_scope:
+        - "per_grid" (default): keep top `tops` rows per grid/pocket
+        - "per_parent_per_grid": keep top `tops` rows per parent ligand per grid/pocket
+      Set `tops=None` or `tops<=0` to disable the cap.
 
-    Args:
-        file_paths: Required dict containing file paths. Must include:
-            - docking_csv: Path to docking results CSV
-            - ligand_input: Ligand structure input (SMILES string, CSV, SDF, MOL2, or directory)
-            - protein_gro: Path to protein GRO file
-            - protein_top: Path to protein topology file
-            - poses_dir: Directory to store prepared poses
-            - gromacs_path: Path to GROMACS installation
-            - ambertools_path: Path to AmberTools installation
-            - gromacs_binary_type: Auto-detected binary type (from discover_paths)
-        tops: Number of top ligands per grid (default: 50)
-        num_cores: CPU cores for ligand prep (0 uses all-1)
-        num_gpus: Number of GPUs for energy minimization (default: 1)
-        charge_type: Charge type for Antechamber [bcc|gas] (default: "bcc")
-        water_margin: Water box margin in nm (default: 1.0)
-        ion_conc: Ion concentration in mol/L (default: 0.15)
-        pname: Cation name (default: "K")
-        nname: Anion name (default: "CL")
-
-    Returns:
-        dict: Updated file_paths dictionary with prepared poses in poses_dir
+    num_gpus: -1 = use all available GPUs in parallel; 0 = CPU-only; N = use N GPUs in parallel.
+    max_jobs: maximum concurrent LigPrepare jobs (0 = auto).
     """
-    lig_prepare = LigPrepare(
-        file_paths=file_paths,
-        tops=tops,
-        num_cores=num_cores if num_cores > 0 else None,
-        num_gpus=num_gpus,
-        charge_type=charge_type,
-        water_margin=water_margin,
-        ion_conc=ion_conc,
-        pname=pname,
-        nname=nname,
+    requested_water_model = (
+        water_model.strip().lower()
+        if isinstance(water_model, str) and water_model.strip()
+        else None
     )
+    workflow_used = _detect_workflow(file_paths, workflow)
+    normalized_forcefield_preset = _resolve_forcefield_preset(forcefield_preset)
+    policy = _make_grompp_policy(approved_grompp_warnings)
 
-    return lig_prepare.run()
+    if workflow_used == "membrane":
+        membrane_gro = file_paths.get("membrane_system_gro")
+        membrane_top = file_paths.get("membrane_system_top")
+        should_build = bool(file_paths.get("membrane_build"))
+        force_rebuild = bool(file_paths.get("force_rebuild"))
+        has_prebuilt = bool(
+            membrane_gro
+            and membrane_top
+            and isinstance(membrane_gro, str)
+            and isinstance(membrane_top, str)
+            and os.path.exists(membrane_gro)
+            and os.path.exists(membrane_top)
+        )
+        if (should_build and not has_prebuilt) or force_rebuild:
+            builder = OpenMMMembraneBuilder(
+                file_paths=file_paths,
+                lipid_type=str(file_paths.get("membrane_lipid_type", "POPC")),
+                minimum_padding_nm=float(file_paths.get("membrane_padding_nm", 2.0)),
+                ionic_strength_m=float(file_paths.get("membrane_ionic_strength_m", 0.15)),
+                positive_ion=str(file_paths.get("membrane_positive_ion", "K+")),
+                negative_ion=str(file_paths.get("membrane_negative_ion", "Cl-")),
+                orientation_policy=str(file_paths.get("orientation_policy", "warn")),
+            )
+            file_paths = builder.run(force_rebuild=force_rebuild)
+
+        prep = MembranePrep(
+            file_paths=file_paths,
+            forcefield=forcefield,
+            water_model=requested_water_model or "tip3p",
+            forcefield_preset=normalized_forcefield_preset,
+            ignore_hydrogens=ignore_hydrogens,
+            water_margin=water_margin,
+            ion_conc=ion_conc,
+            pname=pname,
+            nname=nname,
+            grompp_warning_policy=policy,
+        )
+        result = prep.run()
+    else:
+        current = file_paths
+        if not (current.get("protein_gro") and current.get("protein_top")):
+            topology_water_model = (
+                requested_water_model
+                or (
+                    current.get("water_model", "").strip().lower()
+                    if isinstance(current.get("water_model"), str)
+                    else None
+                )
+                or "tip3p"
+            )
+            topology = ProteinTopology(
+                file_paths=current,
+                forcefield=forcefield,
+                water_model=topology_water_model,
+                forcefield_preset=normalized_forcefield_preset,
+                ignore_hydrogens=ignore_hydrogens,
+            )
+            current = topology.run()
+
+        lig_prepare = LigPrepare(
+            file_paths=current,
+            tops=tops,
+            selection_scope=selection_scope,
+            num_cores=num_cores if num_cores > 0 else None,
+            num_gpus=num_gpus,
+            max_jobs=max_jobs,
+            charge_type=charge_type,
+            atom_type=atom_type,
+            retry_with_gas_on_failure=retry_with_gas_on_failure,
+            water_margin=water_margin,
+            ion_conc=ion_conc,
+            pname=pname,
+            nname=nname,
+            water_model=requested_water_model,
+            grompp_warning_policy=policy,
+        )
+        result = lig_prepare.run()
+        result["water_model"] = lig_prepare.water_model
+
+    result["workflow_used"] = workflow_used
+    return _attach_policy_report(result, policy)
 
 
 @function_tool
-def run_gro(
+def run_md_prepare(
+    file_paths: FilePathsDict, workflow: str = "auto",
+    forcefield: str = "amber99sb-ildn", water_model: Optional[str] = None,
+    forcefield_preset: str = None, ignore_hydrogens: bool = True,
+    tops: Optional[int] = 3, selection_scope: str = "per_grid",
+    num_cores: int = 0, num_gpus: int = -1, max_jobs: int = 0,
+    charge_type: str = "bcc", atom_type: str = "gaff2",
+    retry_with_gas_on_failure: bool = False, water_margin: float = 1.0,
+    ion_conc: float = 0.15, pname: str = "K", nname: str = "CL",
+    approved_grompp_warnings: Optional[List[str]] = None,
+) -> FilePathsDict:
+    """Unified preparation interface for both workflows (agent-facing wrapper)."""
+    return run_md_prepare_impl(**{k: v for k, v in locals().items()})
+
+
+def run_md_simulation_impl(
     file_paths: FilePathsDict,
+    workflow: str = "auto",
     gpu: bool = False,
-    num_gpus: int = 0,
+    num_gpus: int = -1,
     mpi_ranks: int = 0,
     omp_threads: int = 0,
     max_jobs: int = 0,
+    production_nsteps: Optional[int] = None,
+    production_dt_fs: float = 2.0,
+    soluble_eq_nsteps_scale: Optional[float] = None,
+    membrane_prod_nsteps: Optional[int] = None,
+    membrane_eq_nsteps_scale: Optional[float] = None,
     topol: str = "system.top",
     index: str = "index.ndx",
+    approved_grompp_warnings: Optional[List[str]] = None,
 ) -> FilePathsDict:
+    """Unified MD simulation interface for soluble and membrane workflows.
+
+    num_gpus: -1 = use all available GPUs in parallel; 0 = CPU-only; N = use N GPUs (one job per GPU).
+    production_dt_fs: soluble workflow production timestep target (default 2.0 fs; values >2.0 fs are advanced/non-default and auto-fallback to 2.0 fs on failure).
+    production_nsteps: optional soluble workflow production nsteps override applied at runtime.
+    soluble_eq_nsteps_scale: optional multiplier for soluble equilibration nsteps applied at runtime.
+    membrane_prod_nsteps: optional membrane production nsteps override applied at runtime.
+    membrane_eq_nsteps_scale: optional multiplier for membrane equilibration nsteps (for quick smoke tests).
     """
-    Run GROMACS MD simulation step.
+    workflow_used = _detect_workflow(file_paths, workflow)
+    policy = _make_grompp_policy(approved_grompp_warnings)
 
-    This function runs equilibration and production MD simulations for all prepared poses.
-    Executes NVT equilibration, NPT equilibration, and production MD.
+    if workflow_used == "membrane":
+        runner = MembraneMd(
+            file_paths=file_paths,
+            gpu=gpu,
+            num_gpus=num_gpus,
+            mpi_ranks=mpi_ranks,
+            omp_threads=omp_threads,
+            membrane_prod_nsteps=membrane_prod_nsteps,
+            membrane_eq_nsteps_scale=membrane_eq_nsteps_scale,
+            topol=topol,
+            index=index,
+            grompp_warning_policy=policy,
+        )
+    else:
+        runner = SolubleMd(
+            file_paths=file_paths,
+            gpu=gpu,
+            num_gpus=num_gpus,
+            mpi_ranks=mpi_ranks,
+            omp_threads=omp_threads,
+            max_jobs=max_jobs,
+            production_nsteps=production_nsteps,
+            production_dt_fs=production_dt_fs,
+            soluble_eq_nsteps_scale=soluble_eq_nsteps_scale,
+            topol=topol,
+            index=index,
+            grompp_warning_policy=policy,
+        )
 
-    Args:
-        file_paths: Required dict containing file paths. Must include:
-            - poses_dir: Directory containing prepared pose subdirectories (with min.gro files)
-            - gromacs_path: Path to GROMACS installation
-            - ambertools_path: Path to AmberTools installation
-            - gromacs_binary_type: Auto-detected binary type (from discover_paths)
-        gpu: Whether to use GPU for MD (default: False)
-        num_gpus: Number of GPUs available (default: 1)
-        mpi_ranks: Number of MPI ranks (0 = auto-calculate)
-        omp_threads: Number of OpenMP threads (0 = auto-calculate)
-        max_jobs: Maximum concurrent jobs (0 = auto-calculate)
-        topol: Topology file name (default: "system.top")
-        index: Index file name (default: "index.ndx")
-
-    Returns:
-        dict: Updated file_paths dictionary (poses_dir now contains MD-completed poses)
-    """
-    gro = Gro(
-        file_paths=file_paths,
-        gpu=gpu,
-        num_gpus=num_gpus,
-        mpi_ranks=mpi_ranks,
-        omp_threads=omp_threads,
-        max_jobs=max_jobs,
-        topol=topol,
-        index=index,
-    )
-
-    return gro.run()
+    result = runner.run()
+    result["workflow_used"] = workflow_used
+    return _attach_policy_report(result, policy)
 
 
 @function_tool
-def run_stability_analysis(
+def run_md_simulation(
+    file_paths: FilePathsDict, workflow: str = "auto",
+    gpu: bool = False, num_gpus: int = -1, mpi_ranks: int = 0,
+    omp_threads: int = 0, max_jobs: int = 0,
+    production_nsteps: Optional[int] = None, production_dt_fs: float = 2.0,
+    soluble_eq_nsteps_scale: Optional[float] = None,
+    membrane_prod_nsteps: Optional[int] = None,
+    membrane_eq_nsteps_scale: Optional[float] = None,
+    topol: str = "system.top", index: str = "index.ndx",
+    approved_grompp_warnings: Optional[List[str]] = None,
+) -> FilePathsDict:
+    """Unified MD simulation interface (agent-facing wrapper)."""
+    return run_md_simulation_impl(**{k: v for k, v in locals().items()})
+
+
+def run_md_analysis_impl(
     file_paths: FilePathsDict,
+    workflow: str = "auto",
     prefix: str = "md",
-    Range: str = "all",
+    analysis_range: str = "all",
     last_frames: int = 100,
     vina_report: str = "",
 ) -> FilePathsDict:
-    """
-    Run stability analysis step.
+    """Unified trajectory analysis interface for soluble and membrane workflows."""
+    workflow_used = _detect_workflow(file_paths, workflow)
+    if workflow_used == "membrane":
+        analysis = MembraneAnalysis(
+            file_paths=file_paths,
+            prefix=prefix,
+            analysis_range=analysis_range,
+            last_frames=last_frames,
+        )
+    else:
+        analysis = StabilityAnalysis(
+            file_paths=file_paths,
+            prefix=prefix,
+            Range=analysis_range,
+            last_frames=last_frames,
+            vina_report=vina_report or None,
+        )
 
-    This function analyzes MD trajectories for stability metrics including RMSD, RMSF,
-    and generates summary reports.
+    result = analysis.run()
+    result["workflow_used"] = workflow_used
+    return result
 
-    Args:
-        file_paths: Required dict containing file paths. Must include:
-            - poses_dir: Directory containing MD-completed pose subdirectories (with md.tpr/md.xtc)
-            - reports_dir: Directory to write analysis reports
-            - gromacs_path: Path to GROMACS installation
-            - ambertools_path: Path to AmberTools installation
-            - gromacs_binary_type: Auto-detected binary type (from discover_paths)
-        prefix: Prefix for MD files (default: "md")
-        Range: Analysis range: 'all' or 'last' (default: "all")
-        last_frames: Number of last frames when Range='last' (default: 100)
-        vina_report: Path to Vina docking report directory or file (default: "")
 
-    Returns:
-        dict: Updated file_paths dictionary with summary_report and brief_report paths
-    """
-    stability_analysis = StabilityAnalysis(
-        file_paths=file_paths,
-        prefix=prefix,
-        Range=Range,
-        last_frames=last_frames,
-        vina_report=vina_report or None,
-    )
-
-    return stability_analysis.run()
+@function_tool
+def run_md_analysis(
+    file_paths: FilePathsDict, workflow: str = "auto",
+    prefix: str = "md", analysis_range: str = "all",
+    last_frames: int = 100, vina_report: str = "",
+) -> FilePathsDict:
+    """Unified trajectory analysis interface (agent-facing wrapper)."""
+    return run_md_analysis_impl(**{k: v for k, v in locals().items()})
 
 
 prompt_path = Path(__file__).parent / "md_agent_prompt.md"
-system_prompt = prompt_path.read_text()
-
-md_agent = Agent(
-    model="gpt-5.2",
-    name="Stability MD Agent",
-    tools=[
-        read_reference_file,
-        file_parser_agent.as_tool(
-            tool_name="file_parser_agent",
-            tool_description=(
-                "An agent that extracts structured statistics from MD results to check completion status. "
-                "Use this agent to parse MD results directories to check completion status, identify which poses "
-                "have completed MD simulations, and find analysis reports."
-            ),
-        ),
-        build_file_paths,
-        discover_paths,
-        run_protein_topology,
-        run_lig_prepare,
-        run_gro,
-        run_stability_analysis,
-    ],
-    instructions=system_prompt,
+system_prompt = (
+    prompt_path.read_text()
+    + "\n\n"
+    + _format_stored_grompp_approvals_for_prompt()
 )
+
+_md_agent = None
+_md_model = None
+
+
+def get_md_agent() -> Agent:
+    global _md_agent, _md_model
+    current_model = get_current_model_name()
+    if _md_agent is None or _md_model != current_model:
+        _md_agent = Agent(
+            model=get_resolved_model(),
+            name="Stability MD Agent",
+            tools=[
+                read_reference_file,
+                read_plan_document,
+                append_to_plan_section,
+                contribute_stage_to_plan,
+                get_file_parser_agent().as_tool(
+                    tool_name="file_parser_agent",
+                    tool_description=(
+                        "An agent that extracts structured statistics from MD results to check completion status. "
+                        "Use this agent to parse MD results directories to check completion status, identify which poses "
+                        "have completed MD simulations, and find analysis reports."
+                    ),
+                ),
+                # Shared setup
+                build_file_paths,
+                discover_paths,
+                # Unified MD workflow interface
+                run_md_prepare,
+                run_build_membrane_system_openmm,
+                run_md_simulation,
+                run_md_analysis,
+            ],
+            instructions=system_prompt,
+        )
+        _md_model = current_model
+    return _md_agent

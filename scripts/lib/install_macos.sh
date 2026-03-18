@@ -81,14 +81,14 @@ install_step_conda_deps() {
     step "Step 2: Installing conda dependencies"
     ensure_env_active || return 1
 
-    info "Installing boost, swig, rdkit, openbabel, openmm, pdbfixer, jupyter, ipykernel, ipywidgets..."
+    info "Installing rdkit, openbabel, openmm, pdbfixer, pdb2pqr, propka, jupyter, ipykernel, ipywidgets..."
     run_cmd "Installing molecular simulation packages" \
-        "$CONDA_CMD install -y -c conda-forge boost swig rdkit openbabel openmm pdbfixer jupyter ipykernel ipywidgets" || {
+        "$CONDA_CMD install -y -c conda-forge boost swig rdkit openbabel openmm pdbfixer pdb2pqr propka jupyter ipykernel ipywidgets" || {
         error "Failed to install conda dependencies"
         echo ""
         echo "Suggestions:"
         echo "  - Check your internet connection"
-        echo "  - Try: $CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer jupyter ipykernel ipywidgets"
+        echo "  - Try: $CONDA_CMD install -y -c conda-forge rdkit openbabel openmm pdbfixer pdb2pqr propka jupyter ipykernel ipywidgets"
         if confirm_no "Continue anyway?"; then
             warn "Continuing without some dependencies..."
         else
@@ -307,6 +307,14 @@ verify_installation() {
         all_ok=false
     fi
 
+    # dimorphite_dl (ligand protonation state enumeration)
+    if python -c "import dimorphite_dl" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} dimorphite_dl"
+    else
+        echo -e "  ${RED}✗${NC} dimorphite_dl"
+        all_ok=false
+    fi
+
     # openbabel
     if command -v obabel &> /dev/null; then
         echo -e "  ${GREEN}✓${NC} openbabel (obabel)"
@@ -331,6 +339,22 @@ verify_installation() {
         all_ok=false
     fi
 
+    # pdb2pqr (required for protonation)
+    if command -v pdb2pqr &> /dev/null; then
+        echo -e "  ${GREEN}✓${NC} pdb2pqr"
+    else
+        echo -e "  ${RED}✗${NC} pdb2pqr"
+        all_ok=false
+    fi
+
+    # propka3 (required for protonation)
+    if command -v propka3 &> /dev/null; then
+        echo -e "  ${GREEN}✓${NC} propka3"
+    else
+        echo -e "  ${RED}✗${NC} propka3"
+        all_ok=false
+    fi
+
     # antechamber (AmberTools)
     if command -v antechamber &> /dev/null; then
         echo -e "  ${GREEN}✓${NC} antechamber (AmberTools)"
@@ -344,6 +368,9 @@ verify_installation() {
     else
         echo -e "  ${YELLOW}!${NC} gmx (GROMACS) - not in PATH"
     fi
+
+    # unidock (not supported on macOS)
+    echo -e "  ${YELLOW}!${NC} unidock - not supported on macOS (backend=unidock disabled)"
 
     # adams package
     if command -v adams &> /dev/null; then
@@ -374,6 +401,7 @@ run_macos_install() {
     echo ""
     info "Note: GPU acceleration is not available on macOS"
     info "GROMACS will be installed in CPU-only mode"
+    error "UniDock backend is not supported on macOS and will not be installed"
 
     # Check for resume
     if init_progress; then
@@ -391,6 +419,7 @@ run_macos_install() {
     is_step_done "ambertools" || install_step_ambertools || exit 1
     is_step_done "gromacs" || install_step_gromacs || exit 1
     is_step_done "package" || install_step_package || exit 1
+    is_step_done "extra_forcefields" || install_step_extra_forcefields
 
     # Verification
     verify_installation
@@ -404,7 +433,7 @@ run_macos_install() {
     # Test ADAMS command (warm up imports)
     step "Testing ADAMS installation"
     info "Running ADAMS for the first time (this may take a moment)..."
-    conda run -n "$ENV_NAME" --no-capture-output python -c "import adams.cli" >> "$LOG_FILE" 2>&1 || true
+    conda run -n "$ENV_NAME" --no-capture-output python -c "import adams_tui.app" >> "$LOG_FILE" 2>&1 || true
     success "ADAMS is ready to use!"
 
     # Success message

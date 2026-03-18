@@ -3,8 +3,8 @@
 title                   = Protein-ligand complex MD simulation
 ; Run parameters
 integrator              = md        ; leap-frog integrator
-nsteps                  = 1500000   ; 2 * 2500000 = 5000 ps (3 ns)
-;nsteps                  = 5000   ; 2 * 5000 = 10000 ps (10 ps test run)
+nsteps                  = 10000000  ; 10000000 * 0.002 = 20000 ps (20 ns) — minimal for stability assessment
+;nsteps                  = 5000     ; 10 ps test run (comment in to shorten for debugging)
 dt                      = 0.002     ; 2 fs
 ; Output control
 nstenergy               = 5000      ; save energies every 10.0 ps
@@ -30,9 +30,9 @@ coulombtype             = PME       ; Particle Mesh Ewald for long-range electro
 rcoulomb                = 1.2
 pme_order               = 4         ; cubic interpolation
 fourierspacing          = 0.16      ; grid spacing for FFT
-; Temperature coupling
+; Temperature coupling (group names must exist in index.ndx; see make_system_index / REQUIRED_NDX_GROUPS_FOR_TC)
 tcoupl                  = V-rescale                     ; modified Berendsen thermostat
-tc-grps                 = Protein_UNL Water_and_ions    ; two coupling groups - more accurate
+tc-grps                 = Protein_LIG Water_and_ions    ; two coupling groups - more accurate
 tau_t                   = 0.1   0.1                     ; time constant, in ps
 ref_t                   = 300   300                     ; reference temperature, one for each group, in K
 ; Pressure coupling
@@ -43,7 +43,7 @@ ref_p                   = 1.0                           ; reference pressure, in
 compressibility         = 4.5e-5                        ; isothermal compressibility of water, bar^-1
 ; Periodic boundary conditions
 pbc                     = xyz       ; 3-D PBC
-; Dispersion correction is not used for proteins with the C36 additive FF
-DispCorr                = no
+; Long-range dispersion correction for Amber (and other non-CHARMM FFs) with cutoff vdW
+DispCorr                = EnerPres
 ; Velocity generation
 gen_vel                 = no        ; continuing from NPT equilibration

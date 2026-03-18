@@ -1,0 +1,19 @@
+; membrane_min.mdp - Energy minimization for membrane system
+; Steepest descent to relieve bad contacts after membrane embedding
+integrator              = steep
+emtol                   = 1000.0    ; Stop when max force < 1000 kJ/mol/nm
+emstep                  = 0.01      ; Step size (nm)
+nsteps                  = 50000     ; More steps than soluble systems (membrane contacts)
+
+; Neighbor searching
+nstlist                 = 1
+cutoff-scheme           = Verlet
+ns_type                 = grid
+rlist                   = 1.2
+vdwtype                 = cutoff
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+coulombtype             = PME
+rcoulomb                = 1.2
+pbc                     = xyz

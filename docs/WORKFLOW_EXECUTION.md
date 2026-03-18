@@ -13,10 +13,11 @@ This document provides detailed information about workflow execution, module exe
 
 ## Pipeline Stages
 
-The pipeline consists of two main stages:
+The pipeline consists of three main stages:
 
 1. **Preprocessing Stage**: Cleans receptor PDBs and processes ligand CSVs
 2. **Docking Stage**: Discovers binding sites and performs molecular docking
+3. **MD Analysis Stage**: Runs molecular dynamics simulations and stability analysis
 
 ---
 
@@ -29,7 +30,17 @@ The pipeline consists of two main stages:
 2. `run_find_pocket` - Cluster search results
 3. `run_vina_dock` (ligands mode) OR `run_vina_dock_gpu` - Production docking
 
-*MD / stability analysis stage: coming soon in a future release.*
+### MD Agent Execution Order
+
+**Strict Sequence:**
+1. `build_file_paths` - Initialize file_paths dictionary
+2. `discover_paths` - Discover GROMACS/AmberTools paths
+3. `run_protein_topology` - Prepare protein topology
+4. `run_lig_prepare` - Prepare ligands and combine with protein
+5. `run_gro` - Run MD simulations
+6. `run_stability_analysis` - Analyze trajectories
+
+**Note:** The `file_paths` dictionary is passed between steps and updated by each function.
 
 ---
 
@@ -75,6 +86,19 @@ output_folder/
 │       │   └── production_docking_results.csv
 │       └── metadata/       # Docking metadata
 │           └── dock_metadata.pkl
+│
+└── md_analysis/            # Molecular Dynamics analysis outputs
+    ├── protein/            # Protein topology files
+    │   ├── protein.gro
+    │   └── topol.top
+    ├── poses/              # Prepared ligand poses for MD
+    │   └── {ligand_name}_pocket_{grid_id}_top{rank}/
+    │       ├── {ligand_name}.gro
+    │       ├── {ligand_name}.top
+    │       └── ... (GROMACS simulation files)
+    └── reports/            # MD analysis reports
+        ├── md_analysis_summary_{range}.csv
+        └── brief_report_{range}.csv
 ```
 
 ### Preprocessing Outputs
@@ -84,13 +108,13 @@ output_folder/
 - `{outpath}/preprocessing/ligands/{prefix}_{ligand_set_name}.pdb` - Extracted ligand (if `ligand=True`)
 
 **`run_protonate_receptor` outputs (MANDATORY after run_clean_pdb):**
-- `{outpath}/preprocessing/receptors/{prefix}_{chain}_protonated.pdb` - Protonated protein PDB (with pKa-based hydrogens, used by Docking Agent)
+- `{outpath}/preprocessing/receptors/{prefix}_{chain}_protonated.pdb` - Protonated protein PDB (with pKa-based hydrogens, used by Docking Agent and MD Agent)
 - `{outpath}/preprocessing/receptors/{prefix}_{chain}_protonated.pqr` - PQR file with charges
 
 **`run_data_processing` outputs:**
 - `{outpath}/preprocessing/ligands/{prefix}_smallMW.csv` - Compounds at/below MW cutoff (used by Docking Agent)
 - `{outpath}/preprocessing/ligands/{prefix}_largeMW.csv` - Compounds above MW cutoff
-- `{outpath}/preprocessing/ligands/{prefix}_frac{sampling_frac}.csv` - Sampled dataset (if `sampling=True`, used by Docking Agent)
+- `{outpath}/preprocessing/ligands/{prefix}_frac{sampling_frac}.csv` - Sampled dataset (if `sampling=True`, used by Docking Agent and MD Agent)
 
 ### Docking Outputs
 
@@ -103,12 +127,60 @@ output_folder/
 - `{out_path}/docking/search/summaries/docking_centers.csv` - Top N binding pocket coordinates (used for production docking)
 
 **Production Docking (`run_vina_dock` or `run_vina_dock_gpu`):**
-- `{out_folder}/docking/production/summaries/production_docking_results.csv` - Best pose per pocket from production docking
+- `{out_folder}/docking/production/summaries/production_docking_results.csv` - Best pose per pocket from production docking (preferred for MD analysis)
 - `{out_folder}/docking/production/poses/ligand_{idx}_pocket_{pocket_id}_docked.pdbqt` - Individual docking pose files
 
 **Important Notes:**
 - Search docking uses `grid_{grid_id}` in filenames (e.g., `ligand_0_grid_5_docked.pdbqt`)
 - Production docking uses `pocket_{pocket_id}` in filenames (e.g., `ligand_0_pocket_2_docked.pdbqt`)
+- For MD analysis: The MD pipeline prioritizes `production_docking_results.csv` over `best_docking_centers.csv`
+
+### MD Analysis Outputs
+
+**`run_protein_topology` outputs:**
+- `{protein_dir}/protein.gro` - Protein structure in GRO format
+- `{protein_dir}/topol.top` - Protein topology file
+- `{protein_dir}/posre.itp` - Position restraints file
+
+**`run_lig_prepare` outputs:**
+- `{poses_dir}/{ligand_name}_pocket_{grid_id}_top{rank}/` directories with:
+  - `min.gro` - Minimized structure
+  - `system.top` - System topology
+  - `index.ndx` - Index file
+
+**`run_gro` outputs:**
+- `{poses_dir}/{ligand_name}_pocket_{grid_id}_top{rank}/` directories with:
+  - `md.tpr` - MD run input file
+  - `md.xtc` - Trajectory file
+  - `md.gro` - Final structure
+
+**`run_stability_analysis` outputs:**
+- `{reports_dir}/md_analysis_summary_{range}.csv` - Detailed analysis report
+- `{reports_dir}/brief_report_{range}.csv` - Brief summary report
+
+### File Paths Dictionary (MD Agent)
+
+The MD agent uses a `file_paths` dictionary as the single source of truth for all paths. Keys include:
+
+**Directory keys:**
+- `md_root`: Root MD analysis directory
+- `protein_dir`: Directory for protein topology files
+- `poses_dir`: Directory containing pose subdirectories
+- `reports_dir`: Directory for analysis reports
+
+**File keys:**
+- `protein_file`: Input protein PDB file
+- `protein_gro`: Protein structure in GRO format
+- `protein_top`: Protein topology file
+- `posre_itp`: Position restraints file
+- `docking_csv`: Docking results CSV
+- `smiles_file`: SMILES CSV file
+- `gromacs_path`: Path to GROMACS bin directory
+- `ambertools_path`: Path to AmberTools home directory
+- `gromacs_binary_type`: Detected type ("cuda", "mpi", or "standard")
+- `summary_report`: Path to analysis summary report
+- `brief_report`: Path to brief report
+
 ---
 
 ## Entry Points
@@ -123,6 +195,18 @@ The pipeline can start from any of 7 entry points, allowing users to resume from
 
 3. **Entry Point 3 (Production Docking)**: Production docking only - dock at known binding sites
    - Required: Cleaned receptor, SMILES CSV, docking_centers or docking_centers_file
+
+4. **Entry Point 4 (ProteinTopology)**: MD from protein topology generation
+   - Required: `protein_file` (cleaned PDB), docking_csv, smiles_file
+
+5. **Entry Point 5 (LigPrepare)**: MD from ligand preparation
+   - Required: `protein_gro`, `protein_top`, docking_csv, smiles_file
+
+6. **Entry Point 6 (Gro)**: MD from MD simulations
+   - Required: `poses_dir` (with min.gro, system.top, index.ndx)
+
+7. **Entry Point 7 (Analysis)**: Stability analysis only
+   - Required: `poses_dir` (with md.tpr, md.xtc, md.gro, index files)
 
 ---
 

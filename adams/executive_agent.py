@@ -2,39 +2,41 @@ from pathlib import Path
 from typing import List, Optional
 
 from agents import Agent, ModelSettings, function_tool
-from agents.tracing import add_trace_processor
+from agents.tracing import set_trace_processors
 
 from .common_utils import get_gpu_usage_decision
-from .helper_agents.file_finder.file_finder_agent import file_finder_agent
-from .helper_agents.file_parser.file_parser_agent import file_parser_agent
-from .helper_agents.meta_analysis.meta_analysis_agent import meta_analysis_agent
-from .helper_agents.oversight.oversight_agent import oversight_agent
-from .memory.memory_tools import MEMORY_TOOLS
-from .memory.persistent_memory import get_memory_summary
-from .memory.session_memory import (
-    format_session_context_for_prompt,
-    get_session_context_summary,
+from .helper_agents.file_finder.file_finder_agent import get_file_finder_agent
+from .helper_agents.file_parser.file_parser_agent import get_file_parser_agent
+from .helper_agents.meta_analysis.meta_analysis_agent import get_meta_analysis_agent
+from .helper_agents.oversight.oversight_agent import get_oversight_agent
+from .memory.memory_tools import (
+    PERSISTENT_MEMORY_TOOLS,
+    set_session_description_tool,
+    set_session_tags_tool,
+    tag_session,
 )
-from .path_config import get_agent_data_path, set_agent_data_path
-from .pipeline.data_preprocessing.preprocessing_agent import preprocessing_agent
-from .pipeline.workflow_agent import workflow_agent
+from .memory.persistent_memory import get_memory_summary
+from .memory.session_memory import get_session_context_summary, format_session_context_for_prompt
+from .path_config import get_agent_data_path, set_agent_data_path, set_current_session_id
+from .pipeline.workflow_wrapper import _make_workflow_agent_wrapper
 from .utils import list_agent_data_files
 from .utils.trace_writer import JsonTraceProcessor
 from .pipeline.references.reference_file_reader import read_reference_file
+from .user_plan_utils import (
+    append_to_plan_section,
+    clone_plan,
+    get_all_plan_tags,
+    list_plans_by_tag,
+    read_plan_document,
+)
+from .pipeline.workflow_agent import create_run_directory
+from .plan_questions_tool import collect_plan_answers
 
 
-def _resolve_model(model: str):
-    """Resolve a model string to an SDK-compatible model object.
+from .model_config import get_resolved_model, set_model
 
-    Plain names (e.g. 'gpt-5') are passed through as-is for native OpenAI
-    routing.  Names containing '/' (e.g. 'gemini/gemini-3-pro',
-    'anthropic/claude-3-5-sonnet-20240620') are wrapped in LitellmModel
-    so the Agents SDK routes them through LiteLLM.
-    """
-    if "/" in model:
-        from agents.extensions.models.litellm_model import LitellmModel
-        return LitellmModel(model=model)
-    return model
+
+_active_trace_processor: Optional[JsonTraceProcessor] = None
 
 
 @function_tool
@@ -225,8 +227,8 @@ def list_agent_data_files_tool() -> dict:
     - User asks "what files do I have?" or "what can I run?"
     - You want to identify receptor and ligand files without detailed scanning
 
-    Note: For more detailed file discovery and entry point analysis, use the file_finder_agent
-    which provides comprehensive scanning and entry point recommendations.
+    Note: For more structured file discovery, use the file_finder_agent.
+    It searches the CWD for new runs and `agent_data/` only for resume-style requests.
 
     Returns:
         dict: Dictionary containing:
@@ -267,12 +269,22 @@ def setup_tracing(session_id: Optional[str] = None) -> JsonTraceProcessor:
     Raises:
         RuntimeError: If trace processor initialization fails
     """
+    global _active_trace_processor
     try:
+        # One launcher process -> one active trace/session. Reuse if already initialized.
+        if _active_trace_processor is not None:
+            set_trace_processors([_active_trace_processor])
+            set_current_session_id(_active_trace_processor.session_id)
+            return _active_trace_processor
+
         trace_output_dir = get_agent_data_path() / "traces"
         trace_processor = JsonTraceProcessor(
             output_dir=str(trace_output_dir), session_id=session_id
         )
-        add_trace_processor(trace_processor)
+        # Replace any existing processors so one session = one trace file (no duplicates)
+        set_trace_processors([trace_processor])
+        set_current_session_id(trace_processor.session_id)
+        _active_trace_processor = trace_processor
         if session_id:
             print(f"[Tracing] Continuing session trace file: {trace_processor.filepath}")
         else:
@@ -282,14 +294,14 @@ def setup_tracing(session_id: Optional[str] = None) -> JsonTraceProcessor:
         raise RuntimeError(f"Failed to initialize trace processor: {e}") from e
 
 
-def create_agent(session_id: Optional[str] = None, model: str = "gpt-5") -> Agent:
+def create_agent(session_id: Optional[str] = None, model: str = "gpt-5.4") -> Agent:
     """
     Create and configure the Biophysics Controller Agent.
 
     Args:
         session_id: Optional current session ID; when set, the agent is prompted to tag
             this session when starting work and update description/tags when concluding.
-        model: The LLM model identifier to use (default: gpt-5).
+        model: The LLM model identifier to use (default: gpt-5.4).
 
     Returns:
         Agent: The configured agent instance with all tools and settings
@@ -303,24 +315,26 @@ def create_agent(session_id: Optional[str] = None, model: str = "gpt-5") -> Agen
     except Exception:
         memory_summary = ""
 
+    # Recent session context (tags + recent sessions) for discovery and alignment with past runs
     try:
-        ctx = get_session_context_summary(limit_sessions=10)
-        session_memory_block = format_session_context_for_prompt(ctx)
+        session_ctx = get_session_context_summary(limit_sessions=10)
+        session_context_block = format_session_context_for_prompt(session_ctx)
     except Exception:
-        session_memory_block = ""
+        session_context_block = ""
 
-    # Build system prompt - insert memory summary, session context, optional session_id line, final note
+    # Build system prompt - memory summary, recent session context, optional session_id, final note
     sections = [base_prompt]
     if memory_summary:
         sections.append(f"\n{memory_summary}")
-    if session_memory_block:
-        sections.append(f"\n## Session memory\n{session_memory_block}")
+    if session_context_block:
+        sections.append(f"\n=== RECENT SESSION CONTEXT ===\n{session_context_block}\n==============================")
     if session_id:
-        sections.append(f"\nCurrent session ID: {session_id}. Tag this session when starting work and update description/tags when concluding.")
+        sections.append(f"\nCurrent session ID: {session_id}.")
     sections.append("\nNote: Reference documentation is available via the read_reference_file tool. Use it to look up entry points, parameter defaults, and examples.")
     system_prompt = "\n".join(sections)
 
-    resolved_model = _resolve_model(model)
+    set_model(model)
+    resolved_model = get_resolved_model()
 
     agent = Agent(
         model=resolved_model,
@@ -331,31 +345,31 @@ def create_agent(session_id: Optional[str] = None, model: str = "gpt-5") -> Agen
             list_agent_data_files_tool,
             get_gpu_spec_from_user,
             resolve_gpu_config,
+            read_plan_document,
+            append_to_plan_section,
+            collect_plan_answers,
+            get_all_plan_tags,
+            list_plans_by_tag,
+            clone_plan,
+            create_run_directory,
             read_reference_file,
-            *MEMORY_TOOLS,
-            meta_analysis_agent.as_tool(
+            *PERSISTENT_MEMORY_TOOLS,
+            set_session_description_tool,
+            set_session_tags_tool,
+            tag_session,
+            get_meta_analysis_agent().as_tool(
                 tool_name="meta_analysis_agent",
-                tool_description="""An agent that analyzes pipeline trace files and log files to understand run state.
+                tool_description="""An agent for solving errors in the current run. It has access to trace/log parsing, read-only session history, and read_plan_document for context.
 
                 Use this agent when:
-                - User wants to resume a previous run ("continue", "resume", "pick up where we left off")
-                - After an error occurs and you need to understand what happened
-                - To check if there's an active/incomplete run before starting a new one
-                - You need deeper context from a past session (run state, errors, full trace analysis) after using get_session_plan_summary for a brief overview—pass the session's trace file path from get_session_info(session_id).
+                - An error or failure occurred in the current run and you need to diagnose and fix it
+                - You need trace and log analysis for the current session to understand what went wrong
 
-                The agent will read the trace file and log files and provide:
-                - Output folder and log file paths from the previous run
-                - Which pipeline steps completed successfully
-                - Which steps had errors and error details
-                - File paths used (receptor, ligands, docking centers, etc.)
-                - Run status (completed, error, incomplete)
-                - Entry point used and recommendation for resuming
-
-                CRITICAL: When resuming a run, use the SAME output_folder from the meta analysis.""",
+                The agent will use trace files, log files, session history, and the plan (when plan_path is available) to provide run state, error details, and resume recommendations.""",
             ),
-            file_finder_agent.as_tool(
+            get_file_finder_agent().as_tool(
                 tool_name="file_finder_agent",
-                tool_description="""An intelligent agent that scans agent_data/ to identify and classify files for the pipeline.
+                tool_description="""An intelligent agent that locates the files needed to start or resume the pipeline.
 
                 Use this agent when:
                 - User wants to start the pipeline but you're unsure which step to begin from
@@ -364,22 +378,20 @@ def create_agent(session_id: Optional[str] = None, model: str = "gpt-5") -> Agen
                 - User asks "what can I run?" or "where can I start?"
 
                 The agent will:
-                1. Scan agent_data/ and its subdirectories (including outputs/)
-                2. Identify file types: receptors, SMILES CSVs, docking results, protein topology, pose directories, etc.
-                3. Determine which pipeline entry points are available
-                4. Recommend the most advanced entry point that has all required files
-                5. Report any missing files
+                1. Scan the CWD root for new-run inputs, or `agent_data/` only for resume-style requests
+                2. Identify file types: receptors, ligand inputs, docking results, protein topology, pose directories, etc.
+                3. Determine the best-supported entry point from file evidence
+                4. Return the path bindings needed for that entry point
 
-                Output is concise: RECOMMENDED ENTRY POINT, RELEVANT PATHS (only the paths required for that entry point), WORKFLOW PARAMETERS, and brief NOTES if needed.""",
+                Output is concise: RECOMMENDED ENTRY POINT, RELEVANT PATHS (only the paths required for that entry point), WORKFLOW PARAMETERS (path bindings only), and brief NOTES if needed.""",
             ),
-            file_parser_agent.as_tool(
+            get_file_parser_agent().as_tool(
                 tool_name="file_parser_agent",
-                tool_description="""An agent that extracts structured statistics from pipeline output files to enable parameter extraction and result-based decision making.
+                tool_description="""An agent that extracts structured statistics from pipeline output files.
 
                 Use this agent when:
-                - You need to analyze docking results to determine parameters for the next step (e.g., optimal `tops` parameter for MD)
+                - You need evidence from docking or MD outputs without loading large files
                 - You want to summarize docking results for the user
-                - You need to extract statistics from previous runs to inform parameter decisions
                 - You want to check completion status or identify which poses are available
                 - You need to analyze affinity distributions, pose counts, or pocket statistics
 
@@ -392,57 +404,31 @@ def create_agent(session_id: Optional[str] = None, model: str = "gpt-5") -> Agen
                 2. Parse docking results to extract statistics.
                 - Pose counts, affinity stats, pocket analysis
 
-                Use this agent in conjunction with meta_analysis_agent and file_finder_agent to gather comprehensive information about pipeline state and results.""",
+                It returns evidence; the caller decides parameters and next actions.""",
             ),
-            oversight_agent.as_tool(
+            get_oversight_agent().as_tool(
                 tool_name="oversight_agent",
                 tool_description="""An agent that reviews and validates pipeline execution plans before execution.
 
-            **Before calling this tool:** Check session memory for a similar approved plan: call get_all_session_tags or list_recent_sessions; if a session matches your task, call get_session_plan_summary(session_id) and adapt that plan, then submit to oversight.
+            **BEFORE calling this tool:** (1) The plan document must exist and be filled by the workflow and stage agents. (2) User must have answered plan questions and you must have recorded them: get questions via collect_plan_answers(plan_path), present them in chat, then append_to_plan_section(plan_path, "answers", ...) when the user replies. Submit to oversight **after** that so oversight sees the finalized plan. Do NOT submit a hand-written "proposed plan" or a plan without answers when questions exist.
+            - When no plan exists: Call workflow_agent in plan-only mode (user's exact message). After workflow returns plan_path, if the plan has questions get them via collect_plan_answers(plan_path), present in chat, record answers when the user replies, then read_plan_document(plan_path) and call oversight_agent once.
+            - When you already have a plan_path with answers recorded: Call read_plan_document(plan_path), then call oversight_agent with that plan and the user's request.
 
-            **CRITICAL: You MUST submit your plan to the oversight_agent for review before calling workflow_agent.**
+            **CRITICAL: Submit the plan to oversight_agent only AFTER the plan exists, is filled, and user answers are recorded (Step 6 then Step 7). Call oversight once with the finalized plan; if rejected, revise and resubmit once.**
 
             Use this agent when:
-            - You have formulated a plan to execute the pipeline
-            - Before calling workflow_agent for the first time in a conversation
-            - When proposing significant parameter changes or non-standard workflows
-            - When the user request is ambiguous and you need validation of your interpretation
+            - You have a plan_path, have collected and recorded user answers (if the plan had questions), and have read the plan via read_plan_document(plan_path)
+            - You need validation before execution
 
-            The oversight agent returns a structured response: exact_plan (the plan text only, no notes) and feedback/concerns/suggestions separately. Use exact_plan as the plan to execute; use feedback and suggestions to inform adjustments.
+            The oversight agent returns: exact_plan, feedback, concerns, suggestions. Use exact_plan as the plan to execute.
 
-            The oversight agent will:
-            1. Validate that your plan makes scientific sense in the context of molecular docking/biophysics
-            2. Check that your plan aligns with the user's request
-            3. Review parameter choices for reasonableness and consistency
-            4. Identify potential issues before execution
-            5. Return the exact plan and any notes/suggestions separately
-
-            **WORKFLOW WITH OVERSIGHT:**
-            1. Interpret user intent and gather necessary information
-            2. Formulate your execution plan (what you will do, which entry point, parameters)
-            3. **Submit plan to oversight_agent for review** - include:
-            - The user's original request
-            - Your proposed plan (description of steps)
-            - Proposed parameters (as a dictionary)
-            - Entry point you plan to use
-            - Any relevant context (e.g., "resuming from previous run", "user agreed to GPU usage when prompted")
-            4. Review the oversight feedback:
-            - If approved: Proceed with execution (may still have suggestions to consider)
-            - If rejected: Revise plan based on feedback and resubmit
-            - Address any concerns or suggestions before proceeding
-            5. Execute the validated plan using workflow_agent
-
-            **IMPORTANT:**
-            - Always submit plans before execution - oversight helps prevent errors and wasted computation
-            - If oversight raises concerns, address them before proceeding
-            - You can still proceed if oversight approves with minor suggestions, but consider the feedback
-            - For very simple, straightforward requests (e.g., "run docking"), oversight may approve quickly
-            - For complex or ambiguous requests, oversight feedback is especially valuable""",
+            **WORKFLOW:**
+            1. workflow_agent in plan-only mode → plan_path.
+            2. collect_plan_answers(plan_path); present questions in chat; append_to_plan_section(plan_path, "answers", ...) when user replies.
+            3. read_plan_document(plan_path); oversight_agent(plan, user request).
+            4. If approved: workflow_agent(..., plan_path=..., session_id=...) to execute. If rejected: Revise and resubmit once.""",
             ),
-            workflow_agent.as_tool(
-                tool_name="workflow_agent",
-                tool_description="An agent that coordinates the complete molecular docking workflow. Use this agent for full pipelines (preprocessing -> docking -> MD), or individual steps. It also supports custom data manipulation and Python code execution via the preprocessing agent. You can specify whether to use the GPU by passing use_gpu=True or use_gpu=False.",
-            ),
+            _make_workflow_agent_wrapper(),
         ],
         model_settings=ModelSettings(tool_choice="auto"),
     )

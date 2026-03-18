@@ -1,6 +1,6 @@
 """
-    Meta Analysis Agent - Analyzes pipeline trace files and log files to understand run state
-    for resuming, error handling, and context extraction.
+Meta Analysis Agent - Diagnoses the current run using trace/log parsing,
+read-only session history, and plan context.
 """
 
 from pathlib import Path
@@ -9,6 +9,8 @@ from agents import Agent, ModelSettings, function_tool
 
 from ...path_config import get_subdirectory
 from ...pipeline.references.reference_file_reader import read_reference_file
+from ...user_plan_utils import read_plan_document
+from ...memory.memory_tools import SESSION_MEMORY_READ_TOOLS
 from .log_parser import parse_log_file_impl, search_log_file_impl
 from .trace_parser import parse_trace_file_impl
 
@@ -51,7 +53,7 @@ def read_trace_file(trace_file: str = None) -> dict:
         Each line in the trace file is a JSON object representing an event:
         - session_start/session_end: Session boundaries with session_id
         - workflow_start/workflow_end: Workflow execution boundaries
-        - agent_start/agent_end: When agents (preprocessing_agent, docking_agent) run
+        - agent_start/agent_end: When agents (preprocessing_agent, docking_agent, md_agent) run
         - tool_call_start/tool_call_end: Tool executions with inputs and outputs
 
     Example:
@@ -134,7 +136,7 @@ def parse_trace_file(trace_file: str = None) -> dict:
             - 'entry_point' (str): Inferred entry point used
             - 'output_folder' (str or None): Output folder path
             - 'log_file' (str or None): Log file path
-            - 'completed_steps' (list): List of completed steps (preprocessing, docking)
+            - 'completed_steps' (list): List of completed steps (preprocessing, docking, md_analysis)
             - 'steps_with_errors' (list): List of steps that had errors
             - 'file_paths' (dict): Dict with:
                 - 'receptor' (str or None): Receptor file path
@@ -181,7 +183,7 @@ def parse_log_file(log_file: str) -> dict:
             - 'log_file' (str): Path to the log file parsed
             - 'steps' (list): List of step dictionaries with:
                 - 'name' (str): Step name (module name)
-                - 'stage' (str): Pipeline stage (preprocessing, docking)
+                - 'stage' (str): Pipeline stage (preprocessing, docking, md_analysis)
                 - 'started' (str): Start timestamp
                 - 'completed' (str): Completion timestamp (or None)
                 - 'duration_sec' (float): Duration in seconds (or None)
@@ -333,9 +335,8 @@ def list_log_files() -> dict:
             - 'error' (str or None): Error message if listing failed
 
     Log File Naming:
-        Log files follow pattern: adams_pipeline_run_{run_identifier}.log
+        Log files follow: adams_pipeline_run_{run_identifier}.log
         Example: "agent_data/logs/adams_pipeline_run_20251213_120500.log"
-        The run_identifier matches the run folder name (e.g., "20251213_120500" or "full_docking_2ppn_9e7c")
 
     Example:
         >>> result = list_log_files()
@@ -373,13 +374,14 @@ def list_log_files() -> dict:
             log_path = str(log_file)
             log_file_list.append(log_path)
 
-            # Extract run identifier from filename
-            # Pattern: adams_pipeline_run_{run_identifier}.log
+            # Extract run identifier from filename:
+            # adams_pipeline_run_{run_identifier}.log
             filename = log_file.name
             if filename.startswith("adams_pipeline_run_") and filename.endswith(".log"):
                 run_id = filename[len("adams_pipeline_run_") : -len(".log")]
                 run_identifiers.append(run_id)
-                log_file_map[run_id] = log_path
+                if run_id not in log_file_map:
+                    log_file_map[run_id] = log_path
 
         return {
             "log_files": log_file_list,
@@ -403,18 +405,32 @@ def list_log_files() -> dict:
 prompt_path = Path(__file__).parent / "meta_analysis_prompt.md"
 system_prompt = prompt_path.read_text()
 
-meta_analysis_agent = Agent(
-    model="gpt-5-mini",
-    name="Meta Analysis Agent",
-    instructions=system_prompt,
-    tools=[
-        read_reference_file,
-        parse_trace_file,
-        read_trace_file,
-        parse_log_file,
-        search_log_file,
-        list_trace_files,
-        list_log_files,
-    ],
-    model_settings=ModelSettings(tool_choice="auto"),
-)
+_meta_analysis_agent = None
+_meta_analysis_model = None
+
+
+def get_meta_analysis_agent() -> Agent:
+    global _meta_analysis_agent, _meta_analysis_model
+    from ...model_config import get_current_model_name, get_resolved_model
+
+    current_model = get_current_model_name()
+    if _meta_analysis_agent is None or _meta_analysis_model != current_model:
+        _meta_analysis_agent = Agent(
+            model=get_resolved_model(),
+            name="Meta Analysis Agent",
+            instructions=system_prompt,
+            tools=[
+                read_reference_file,
+                read_plan_document,
+                parse_trace_file,
+                read_trace_file,
+                parse_log_file,
+                search_log_file,
+                list_trace_files,
+                list_log_files,
+                *SESSION_MEMORY_READ_TOOLS,
+            ],
+            model_settings=ModelSettings(tool_choice="auto"),
+        )
+        _meta_analysis_model = current_model
+    return _meta_analysis_agent

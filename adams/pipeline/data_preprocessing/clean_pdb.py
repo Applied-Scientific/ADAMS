@@ -29,6 +29,82 @@ WATER_RESNAMES = {
 }
 
 
+def _parse_pdb_resseq(line: str) -> Optional[int]:
+    """Extract integer residue sequence number from a PDB ATOM/HETATM line."""
+    if len(line) < 26:
+        return None
+    token = line[22:26].strip()
+    if not token:
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _parse_pdb_serial(line: str) -> Optional[int]:
+    """Extract atom serial number from a PDB ATOM/HETATM line."""
+    if len(line) < 11:
+        return None
+    token = line[6:11].strip()
+    if not token:
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _parse_pdb_residue_key(line: str) -> Optional[Tuple[str, str, str, str]]:
+    """Extract (chain, resseq, icode, resname) from ATOM/HETATM/LINK residue fields."""
+    if len(line) < 27:
+        return None
+    resname = (line[17:20] or "").strip().upper()
+    chain = line[21:22].strip()
+    resseq = line[22:26].strip()
+    icode = line[26:27].strip()
+    if not resname or not resseq:
+        return None
+    return (chain, resseq, icode, resname)
+
+
+def _parse_link_residue_keys(line: str) -> Optional[Tuple[Tuple[str, str, str, str], Tuple[str, str, str, str]]]:
+    """Extract both residue keys from a PDB LINK record."""
+    if len(line) < 57:
+        return None
+    resname1 = (line[17:20] or "").strip().upper()
+    chain1 = line[21:22].strip()
+    resseq1 = line[22:26].strip()
+    icode1 = line[26:27].strip()
+
+    resname2 = (line[47:50] or "").strip().upper()
+    chain2 = line[51:52].strip()
+    resseq2 = line[52:56].strip()
+    icode2 = line[56:57].strip()
+
+    if not resname1 or not resseq1 or not resname2 or not resseq2:
+        return None
+    return (
+        (chain1, resseq1, icode1, resname1),
+        (chain2, resseq2, icode2, resname2),
+    )
+
+
+def _parse_conect_serials(line: str) -> List[int]:
+    """Parse integer serials from a PDB CONECT line."""
+    serials: List[int] = []
+    payload = line[6:]
+    for i in range(0, len(payload), 5):
+        tok = payload[i:i + 5].strip()
+        if not tok:
+            continue
+        try:
+            serials.append(int(tok))
+        except ValueError:
+            continue
+    return serials
+
+
 def _parse_poly_seq_scheme_rows(path: str) -> Dict[str, List[Tuple[int, str, bool]]]:
     """
     Parse mmCIF _pdbx_poly_seq_scheme rows.
@@ -178,6 +254,8 @@ class CleanPDB:
         outpath: str = "output",
         ligand: bool = False,
         chain_to_keep: Optional[Union[str, Sequence[str]]] = "all",
+        residue_range_start: Optional[int] = None,
+        residue_range_end: Optional[int] = None,
         keep_water: bool = False,
         keep_heterogens: Optional[Union[Sequence[str], str]] = "essential",
         model_missing_residues: bool = True,
@@ -194,6 +272,10 @@ class CleanPDB:
                 - "all" or None (default): keep all chains
                 - "A": keep one chain
                 - "A,B,C" or ["A","B","C"]: keep selected chains
+            residue_range_start: Inclusive residue sequence lower bound (PDB resseq).
+                None keeps the lower range unbounded.
+            residue_range_end: Inclusive residue sequence upper bound (PDB resseq).
+                None keeps the upper range unbounded.
             keep_water: bool: If True, retain water molecules (e.g. structural waters).
                 Default: False.
             keep_heterogens: "essential" (default) = keep ESSENTIAL_HETEROGENS_TO_KEEP. None or [] = remove all.
@@ -211,6 +293,10 @@ class CleanPDB:
         self.ligand = ligand
         self.chain_to_keep = chain_to_keep
         self._chains_to_keep = self._normalize_chain_selection(chain_to_keep)
+        (
+            self._residue_range_start,
+            self._residue_range_end,
+        ) = self._normalize_residue_range(residue_range_start, residue_range_end)
         self.keep_water = keep_water
         self.model_missing_residues = model_missing_residues
         self.max_missing_residues_per_gap = max_missing_residues_per_gap
@@ -335,12 +421,58 @@ class CleanPDB:
 
         return frozenset(tokens)
 
+    @staticmethod
+    def _normalize_residue_bound(
+        value: Optional[Union[int, str]], name: str
+    ) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            token = value.strip()
+            if not token:
+                return None
+            value = token
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{name} must be an integer or None, got: {value!r}"
+            ) from None
+
+    @classmethod
+    def _normalize_residue_range(
+        cls,
+        residue_range_start: Optional[Union[int, str]],
+        residue_range_end: Optional[Union[int, str]],
+    ) -> Tuple[Optional[int], Optional[int]]:
+        start = cls._normalize_residue_bound(
+            residue_range_start, "residue_range_start"
+        )
+        end = cls._normalize_residue_bound(residue_range_end, "residue_range_end")
+        if start is not None and end is not None and start > end:
+            raise ValueError(
+                "residue_range_start must be <= residue_range_end "
+                f"(got {start} > {end})."
+            )
+        return start, end
+
     def _chain_label(self) -> str:
         if self._chains_to_keep is None:
             return "all"
         if len(self._chains_to_keep) == 1:
             return next(iter(self._chains_to_keep))
         return "-".join(sorted(self._chains_to_keep))
+
+    def _residue_in_selected_range(self, resseq: Optional[int]) -> bool:
+        if self._residue_range_start is None and self._residue_range_end is None:
+            return True
+        if resseq is None:
+            return False
+        if self._residue_range_start is not None and resseq < self._residue_range_start:
+            return False
+        if self._residue_range_end is not None and resseq > self._residue_range_end:
+            return False
+        return True
 
     def _chain_is_selected(self, chain_id: str) -> bool:
         if self._chains_to_keep is None:
@@ -387,14 +519,20 @@ class CleanPDB:
         fd, temp_path = tempfile.mkstemp(suffix=".pdb", prefix="clean_pdb_src_")
         try:
             with os.fdopen(fd, "w") as f:
-                PDBFile.writeFile(fixer.topology, fixer.positions, f)
+                # Preserve original chain/residue IDs from mmCIF.
+                # Without keepIds=True, OpenMM renumbers residues from 1, which
+                # breaks residue_range filtering when users specify auth numbering
+                # (e.g., hERG pore 544-667).
+                PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
             return temp_path
         except Exception:
             os.close(fd)
             raise
 
 
-    def _filter_heterogens_pdb(self, path: str) -> str:
+    def _filter_heterogens_pdb(
+        self, path: str, apply_residue_range: bool = True
+    ) -> str:
         r"""
         Pre-filter PDB to keep only ATOM lines and allowed HETATMs (waters and/or
         keep_heterogens). Returns path to a temporary PDB file. Caller must delete it.
@@ -405,37 +543,122 @@ class CleanPDB:
         """
         keep_water = self.keep_water
         keep_set = self._keep_heterogens_set or frozenset()
-        out_lines = []
+        preserve_connectivity_records = bool(keep_set) or bool(keep_water)
+        out_lines: List[str] = []
+        kept_atom_records = 0
+        kept_serials: set[int] = set()
+        kept_residue_keys: set[Tuple[str, str, str, str]] = set()
+        link_lines_raw: List[str] = []
+        conect_lines_raw: List[str] = []
         with open(path, "r") as f:
             for line in f:
                 if line.startswith("ATOM  "):
                     line_chain = line[21:22].strip() if len(line) > 21 else ""
+                    line_resseq = _parse_pdb_resseq(line)
                     if self._chain_is_selected(line_chain):
-                        out_lines.append(line)
+                        if (not apply_residue_range) or self._residue_in_selected_range(
+                            line_resseq
+                        ):
+                            out_lines.append(line)
+                            kept_atom_records += 1
+                            serial = _parse_pdb_serial(line)
+                            if serial is not None:
+                                kept_serials.add(serial)
+                            residue_key = _parse_pdb_residue_key(line)
+                            if residue_key is not None:
+                                kept_residue_keys.add(residue_key)
                     continue
                 if line.startswith("HETATM"):
                     resname = (line[17:20] or "").strip().upper()
                     line_chain = line[21:22].strip() if len(line) > 21 else ""
+                    line_resseq = _parse_pdb_resseq(line)
+                    if apply_residue_range and (not self._residue_in_selected_range(line_resseq)):
+                        continue
                     if (
                         keep_water
                         and resname in WATER_RESNAMES
                         and self._hetero_chain_is_selected(line_chain)
                     ):
                         out_lines.append(line)
+                        kept_atom_records += 1
+                        serial = _parse_pdb_serial(line)
+                        if serial is not None:
+                            kept_serials.add(serial)
+                        residue_key = _parse_pdb_residue_key(line)
+                        if residue_key is not None:
+                            kept_residue_keys.add(residue_key)
                     elif resname in keep_set and self._hetero_chain_is_selected(line_chain):
                         out_lines.append(line)
+                        kept_atom_records += 1
+                        serial = _parse_pdb_serial(line)
+                        if serial is not None:
+                            kept_serials.add(serial)
+                        residue_key = _parse_pdb_residue_key(line)
+                        if residue_key is not None:
+                            kept_residue_keys.add(residue_key)
                     # else: drop this heterogen
                     continue
-                if line.startswith("CONECT") or line.startswith("LINK"):
+                if preserve_connectivity_records and line.startswith("LINK"):
+                    link_lines_raw.append(line)
+                    continue
+                if preserve_connectivity_records and line.startswith("CONECT"):
+                    conect_lines_raw.append(line)
+                    continue
+                # Keep only safe structural records.
+                if line.startswith("MODEL") or line.startswith("ENDMDL"):
                     out_lines.append(line)
                     continue
-                # MODEL/ENDMDL, TER, END, headers, etc.: keep to preserve structure
-                if line.startswith("TER") or line.startswith("END") or line.startswith("MODEL") or line.startswith("ENDMDL"):
-                    out_lines.append(line)
+                if line.startswith("END"):
+                    out_lines.append("END\n")
                     continue
                 if line.startswith("HEADER") or line.startswith("TITLE") or line.startswith("REMARK") or line.startswith("CRYST1") or line.startswith("ANISOU"):
                     out_lines.append(line)
                     continue
+        if kept_atom_records == 0:
+            detail = (
+                "Pre-filter kept 0 ATOM/HETATM records. "
+                f"input={path}, chain_to_keep={self._chains_to_keep or 'all'}, "
+                f"residue_range=({self._residue_range_start},{self._residue_range_end}), "
+                f"keep_water={self.keep_water}, keep_heterogens={sorted(keep_set) if keep_set else []}"
+            )
+            if apply_residue_range and (
+                self._residue_range_start is not None
+                or self._residue_range_end is not None
+            ):
+                detail += (
+                    " (Residue-range filtering may be incompatible with this input numbering.)"
+                )
+            raise ValueError(detail)
+
+        # Preserve LINK/CONECT for retained atoms/residues when selective heterogen
+        # keeping is enabled. This helps keep metal/cofactor connectivity metadata.
+        if preserve_connectivity_records:
+            while out_lines and out_lines[-1].startswith("END"):
+                out_lines.pop()
+
+            for line in link_lines_raw:
+                link_keys = _parse_link_residue_keys(line)
+                if link_keys is None:
+                    continue
+                left_key, right_key = link_keys
+                if left_key in kept_residue_keys and right_key in kept_residue_keys:
+                    out_lines.append(line if line.endswith("\n") else f"{line}\n")
+
+            for line in conect_lines_raw:
+                serials = _parse_conect_serials(line)
+                if not serials:
+                    continue
+                src = serials[0]
+                if src not in kept_serials:
+                    continue
+                bonded = [s for s in serials[1:] if s in kept_serials]
+                if not bonded:
+                    continue
+                rendered = "CONECT" + "".join(f"{s:5d}" for s in [src, *bonded]) + "\n"
+                out_lines.append(rendered)
+
+        if not out_lines or not out_lines[-1].startswith("END"):
+            out_lines.append("END\n")
         fd, temp_path = tempfile.mkstemp(suffix=".pdb", prefix="clean_pdb_")
         try:
             with os.fdopen(fd, "w") as f:
@@ -454,7 +677,17 @@ class CleanPDB:
         use_prefilter = self.keep_water or (
             self._keep_heterogens_set is not None and len(self._keep_heterogens_set) > 0
         )
+        use_prefilter = use_prefilter or (
+            self._residue_range_start is not None or self._residue_range_end is not None
+        )
         is_pdb_like_input = self.input_pdb.lower().endswith((".pdb", ".ent"))
+
+        if self._residue_range_start is not None or self._residue_range_end is not None:
+            self.logger.info(
+                "Applying residue-range filter: start=%s end=%s",
+                self._residue_range_start,
+                self._residue_range_end,
+            )
 
         if use_prefilter and is_pdb_like_input:
             pdb_to_fix = self._filter_heterogens_pdb(self.input_pdb)
@@ -466,7 +699,26 @@ class CleanPDB:
             try:
                 prefilter_source = self._convert_structure_to_temp_pdb(self.input_pdb)
                 temp_files.append(prefilter_source)
-                pdb_to_fix = self._filter_heterogens_pdb(prefilter_source)
+                try:
+                    pdb_to_fix = self._filter_heterogens_pdb(prefilter_source)
+                except ValueError as filter_error:
+                    if (
+                        self._residue_range_start is not None
+                        or self._residue_range_end is not None
+                    ) and "kept 0 ATOM/HETATM" in str(filter_error):
+                        self.logger.warning(
+                            "Residue-range pre-filter produced an empty structure for non-PDB input; "
+                            "retrying once without residue-range filtering. Requested range: start=%s end=%s. "
+                            "Reason: %s",
+                            self._residue_range_start,
+                            self._residue_range_end,
+                            filter_error,
+                        )
+                        pdb_to_fix = self._filter_heterogens_pdb(
+                            prefilter_source, apply_residue_range=False
+                        )
+                    else:
+                        raise
                 temp_files.append(pdb_to_fix)
                 self.logger.info(
                     "Converted non-PDB input to temporary PDB for selective heterogen filtering."
@@ -648,7 +900,7 @@ class CleanPDB:
                 )
             else:
                 with open(output_pdb, "w") as f:
-                    PDBFile.writeFile(fixer.topology, fixer.positions, f)
+                    PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
 
             self.logger.info(f"Fixed protein saved to {output_pdb}")
 

@@ -5,8 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..helper_agents.meta_analysis.trace_parser import get_trace_plan_pairs
 from ..path_config import get_subdirectory
+from ..utils.json_io import load_json, save_json
 
 
 def _get_sessions_file() -> Path:
@@ -16,40 +16,132 @@ def _get_sessions_file() -> Path:
     return memory_dir / "sessions.json"
 
 
+def _normalize_session(session: Dict) -> None:
+    """In-place: ensure plan_paths is a list[str] and remove invalid entries."""
+    raw_paths = session.get("plan_paths")
+    if raw_paths is None:
+        session["plan_paths"] = []
+    elif isinstance(raw_paths, str):
+        session["plan_paths"] = [raw_paths] if raw_paths.strip() else []
+    elif not isinstance(raw_paths, list):
+        session["plan_paths"] = []
+    else:
+        normalized_paths = []
+        for path in raw_paths:
+            if isinstance(path, str) and path.strip():
+                normalized_paths.append(path)
+        session["plan_paths"] = normalized_paths
+    raw_tags = session.get("tags")
+    if not isinstance(raw_tags, list):
+        session["tags"] = []
+    else:
+        session["tags"] = [str(t).strip() for t in raw_tags if str(t).strip()]
+
+
 def _load_sessions() -> Dict:
-    """Load sessions from JSON file."""
-    sessions_file = _get_sessions_file()
-    if not sessions_file.exists():
-        return {"sessions": []}
-    try:
-        with open(sessions_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"sessions": []}
+    """Load sessions from JSON file. Normalizes each session (e.g. plan_paths list)."""
+    data = load_json(_get_sessions_file(), default={"sessions": []})
+    if not isinstance(data, dict):
+        data = {"sessions": []}
+    sessions = data.get("sessions")
+    if not isinstance(sessions, list):
+        sessions = []
+    normalized_sessions = []
+    for session in sessions:
+        if isinstance(session, dict):
+            _normalize_session(session)
+            normalized_sessions.append(session)
+    data["sessions"] = normalized_sessions
+    return data
 
 
 def _save_sessions(data: Dict) -> None:
     """Save sessions to JSON file."""
-    sessions_file = _get_sessions_file()
-    with open(sessions_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    save_json(_get_sessions_file(), data)
 
 
 def register_session(
-    session_id: str, trace_file_path: str, description: Optional[str] = None, tags: Optional[List[str]] = None
+    session_id: str,
+    trace_file_path: str,
+    description: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    plan_paths: Optional[List[str]] = None,
 ) -> None:
-    """Register a new session."""
+    """Register a new session. Optionally associate plan_paths (a session can have multiple)."""
     data = _load_sessions()
+    paths = [p.strip() for p in (plan_paths or []) if isinstance(p, str) and p.strip()]
+    for existing in data["sessions"]:
+        if existing.get("session_id") == session_id:
+            existing["trace_file"] = trace_file_path
+            if description is not None:
+                existing["description"] = description
+            if tags is not None:
+                existing["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+            if paths:
+                current_paths = existing.get("plan_paths", [])
+                for p in paths:
+                    if p not in current_paths:
+                        current_paths.append(p)
+                existing["plan_paths"] = current_paths
+            existing["timestamp"] = datetime.now().isoformat()
+            _save_sessions(data)
+            return
     session = {
         "session_id": session_id,
         "trace_file": trace_file_path,
         "description": description or "",
-        "tags": tags or [],
+        "tags": [str(t).strip() for t in (tags or []) if str(t).strip()],
         "timestamp": datetime.now().isoformat(),
         "created_at": datetime.now().isoformat(),
+        "plan_paths": paths,
     }
     data["sessions"].append(session)
     _save_sessions(data)
+
+
+def ensure_session(session_id: str, trace_file_path: str) -> None:
+    """Ensure a session record exists. Updates timestamp if present; registers if missing.
+
+    Called when continuing a session so that plan linking via add_session_plan_path
+    always has a target record, even if sessions.json was cleared or the original
+    registration failed.
+    """
+    data = _load_sessions()
+    for session in data["sessions"]:
+        if session["session_id"] == session_id:
+            session["timestamp"] = datetime.now().isoformat()
+            session["trace_file"] = trace_file_path
+            _save_sessions(data)
+            return
+    # Session not found — create a minimal record so plan linking works.
+    session = {
+        "session_id": session_id,
+        "trace_file": trace_file_path,
+        "description": "",
+        "tags": [],
+        "timestamp": datetime.now().isoformat(),
+        "created_at": datetime.now().isoformat(),
+        "plan_paths": [],
+    }
+    data["sessions"].append(session)
+    _save_sessions(data)
+
+
+def add_session_plan_path(session_id: str, plan_path: str) -> bool:
+    """Add a plan path to a session (sessions can have multiple plan paths). Idempotent."""
+    normalized_path = str(plan_path).strip()
+    if not normalized_path:
+        return False
+    data = _load_sessions()
+    for session in data["sessions"]:
+        if session["session_id"] == session_id:
+            paths = session.get("plan_paths") or []
+            if normalized_path not in paths:
+                paths.append(normalized_path)
+                session["plan_paths"] = paths
+            _save_sessions(data)
+            return True
+    return False
 
 
 def get_session(session_id: str) -> Optional[Dict]:
@@ -150,16 +242,10 @@ def get_all_tags() -> Dict[str, int]:
     return tag_counts
 
 
-def get_sessions_by_tag(tag: str) -> List[Dict]:
-    """Get all sessions with a specific tag."""
-    data = _load_sessions()
-    results = []
-    for session in data["sessions"]:
-        if tag in session.get("tags", []):
-            results.append(session)
-    # Sort by timestamp, most recent first
-    results.sort(key=lambda s: s.get("timestamp", ""), reverse=True)
-    return results
+def get_sessions_by_tag(tag: str, limit: Optional[int] = None) -> List[Dict]:
+    """Get lightweight summaries of sessions with a specific tag (same shape as get_session_summaries)."""
+    applied_limit = 50 if limit is None else max(0, int(limit))
+    return get_session_summaries(tag=tag, limit=applied_limit)
 
 
 def get_session_summaries(session_ids: Optional[List[str]] = None, tag: Optional[str] = None, limit: Optional[int] = None) -> List[Dict]:
@@ -185,7 +271,7 @@ def get_session_summaries(session_ids: Optional[List[str]] = None, tag: Optional
     sessions.sort(key=lambda s: s.get("timestamp", ""), reverse=True)
     
     # Apply limit if provided
-    if limit:
+    if limit is not None:
         sessions = sessions[:limit]
     
     # Return summaries (lightweight)
@@ -257,9 +343,9 @@ def _resolve_trace_path(session: Dict) -> Path:
 
 def get_session_plan_summary(session_id: str) -> Dict[str, Any]:
     """
-    Get a brief plan/request summary for a session: metadata plus plan_pairs
-    (user_request_block → approved_plan) from the trace. Use this first when
-    reviewing a session; use meta_analysis_agent for deeper context.
+    Get session metadata only (no trace parsing). Returns session_id, description,
+    tags, timestamp, and plan_paths (list; a session can have multiple).
+    Use meta_analysis_agent for trace/log analysis and current-run error solving.
     """
     session = get_session(session_id)
     if not session:
@@ -269,29 +355,15 @@ def get_session_plan_summary(session_id: str) -> Dict[str, Any]:
             "description": "",
             "tags": [],
             "timestamp": "",
-            "plan_pairs": [],
+            "plan_paths": [],
         }
-
-    trace_path = _resolve_trace_path(session)
-    parsed = get_trace_plan_pairs(str(trace_path))
-    plan_pairs = parsed.get("plan_pairs", [])
-    if parsed.get("error"):
-        return {
-            "error": parsed["error"],
-            "session_id": session_id,
-            "description": session.get("description", ""),
-            "tags": session.get("tags", []),
-            "timestamp": session.get("timestamp", ""),
-            "plan_pairs": plan_pairs,
-        }
-
     return {
         "error": None,
         "session_id": session_id,
         "description": session.get("description", ""),
         "tags": session.get("tags", []),
         "timestamp": session.get("timestamp", ""),
-        "plan_pairs": plan_pairs,
+        "plan_paths": session.get("plan_paths", []),
     }
 
 
@@ -299,7 +371,7 @@ def get_session_context_summary(limit_sessions: int = 10) -> Dict[str, Any]:
     """
     Compact summary for injection into the agent prompt: all tags with counts
     and recent session summaries (session_id, description, tags, timestamp).
-    No trace reads; uses sessions.json only.
+    No trace reads; uses sessions.json only. Injected into the executive prompt.
     """
     tags = get_all_tags()
     summaries = get_session_summaries(limit=limit_sessions)
@@ -314,8 +386,9 @@ def format_session_context_for_prompt(ctx: Dict[str, Any]) -> str:
     tags = ctx.get("tags") or {}
     recent = ctx.get("recent_sessions") or []
     reminder = (
-        "Before submitting a plan to oversight: use the tags and recent sessions below to find "
-        "similar past sessions and align your plan with an approved plan when possible."
+        "Before submitting a plan to oversight: use the tags and recent sessions below to identify "
+        "relevant plan tags (e.g. docking_only, full_pipeline). Then call get_all_plan_tags() and "
+        "list_plans_by_tag(tag) to find plans to adapt or reuse."
     )
     tag_line = (
         "Session tags in use: " + ", ".join(f"{t}({c})" for t, c in sorted(tags.items()))

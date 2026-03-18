@@ -1,14 +1,13 @@
 """Persistent memory management with environment detection and preferences."""
-
-import json
 import multiprocessing
 import platform
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from ..common_utils import get_cpu_count, get_gpu_info
 from ..path_config import get_subdirectory
+from ..utils.json_io import load_json, save_json
 
 # Limits for conciseness
 MAX_LEARNED_BEHAVIOR_WORDS = 50
@@ -89,17 +88,11 @@ def load_persistent_memory() -> Dict[str, Any]:
         save_persistent_memory(memory)
         return memory
 
-    try:
-        with open(memory_file, "r", encoding="utf-8") as f:
-            memory = json.load(f)
-        # Migrate legacy key
-        if "hardware_info" in memory and "environment_info" not in memory:
-            memory["environment_info"] = memory.pop("hardware_info")
-        return memory
-    except (json.JSONDecodeError, IOError):
-        # Fallback to defaults
+    memory = load_json(memory_file)
+    # Reinitialize if missing, invalid, non-dict, or empty (e.g. corrupted or empty file)
+    if not isinstance(memory, dict) or not memory:
         environment_info = detect_environment_info()
-        return {
+        memory = {
             "environment_info": environment_info,
             "user_preferences": {
                 "preferred_gpu_usage": None,
@@ -109,13 +102,14 @@ def load_persistent_memory() -> Dict[str, Any]:
             },
             "custom_instructions": "",
         }
+        save_persistent_memory(memory)
+        return memory
+    return memory
 
 
 def save_persistent_memory(memory: Dict[str, Any]) -> None:
     """Save persistent memory to JSON file."""
-    memory_file = _get_memory_file()
-    with open(memory_file, "w", encoding="utf-8") as f:
-        json.dump(memory, f, indent=2, ensure_ascii=False)
+    save_json(_get_memory_file(), memory)
 
 
 def update_user_preference(key: str, value: Any) -> None:

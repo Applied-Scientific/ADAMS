@@ -32,8 +32,14 @@ import pandas as pd
 from agents import Agent, function_tool
 
 from ...common_utils import get_gpu_count
-from ...helper_agents.file_parser.file_parser_agent import file_parser_agent
+from ...helper_agents.file_parser.file_parser_agent import get_file_parser_agent
 from ...logger_utils import get_logger, setup_logger
+from ...model_config import get_current_model_name, get_resolved_model
+from ...user_plan_utils import (
+    append_to_plan_section,
+    contribute_stage_to_plan,
+    read_plan_document,
+)
 from ..charge_model import validate_charge_model
 from ..file_organization import setup_docking_dirs
 from ..references.reference_file_reader import read_reference_file
@@ -47,12 +53,12 @@ def run_docking(
     receptor: str,
     backend: str = "vina",
     # Common parameters
-    complex: str = None,
+    complex: Optional[str] = None,
     mode: str = "production",
     num_pockets: int = 1,
     num_poses: int = 5,
     docking_centers: Optional[List[float]] = None,
-    docking_centers_file: str = None,
+    docking_centers_file: Optional[str] = None,
     minimized_dock: bool = False,
     search_gridsize: float = 25.0,
     production_gridsize: Optional[float] = None,
@@ -69,19 +75,19 @@ def run_docking(
     num_gpus: Optional[int] = None,
     gpu_ids: Optional[List[int]] = None,
     # UniDock specific (passed through, None = use unidock defaults)
-    scoring: str = None,
-    exhaustiveness: int = None,
-    search_mode: str = None,
-    energy_range: float = None,
-    min_rmsd: float = None,
-    spacing: float = None,
-    seed: int = None,
-    refine_step: int = None,
-    max_evals: int = None,
-    max_step: int = None,
-    max_gpu_memory: int = None,
-    verbosity: int = None,
-    cpu: int = None,
+    scoring: Optional[str] = None,
+    exhaustiveness: Optional[int] = None,
+    search_mode: Optional[str] = None,
+    energy_range: Optional[float] = None,
+    min_rmsd: Optional[float] = None,
+    spacing: Optional[float] = None,
+    seed: Optional[int] = None,
+    refine_step: Optional[int] = None,
+    max_evals: Optional[int] = None,
+    max_step: Optional[int] = None,
+    max_gpu_memory: Optional[int] = None,
+    verbosity: Optional[int] = None,
+    cpu: Optional[int] = None,
 ) -> str:
     """
     Run molecular docking with selectable backend engine.
@@ -125,7 +131,7 @@ def run_docking(
                 minimized ligand coordinates.
             search_margin: Margin around receptor bounds for search. Default: 5.0
             out_folder: Output directory. Default: "out_folder"
-            log_file: Optional path for this run's log file (e.g. agent_data/logs/adams_pipeline_<run_name>.log).
+            log_file: Optional path for this run's log file (e.g. agent_data/logs/adams_pipeline_run_<run_name>.log).
                 If set, all log output for this run is written here. Use for comparison runs so each run has its own log.
             pH: float: pH value for receptor protonation state (default: 7.4). Used when converting
                 PDB receptor to PDBQT format. Must match the pH used in preprocessing (run_clean_pdb)
@@ -175,10 +181,9 @@ def run_docking(
         )
 
     # Validate and set defaults (backend-specific; backends also default num_cores/num_gpus when None)
+    # Treat 0 as "use default" so callers (e.g. LLM tools) passing 0 get backend default instead of error
     if production_gridsize is not None and production_gridsize <= 0:
-        raise ValueError(
-            f"production_gridsize must be > 0 when provided, got {production_gridsize}"
-        )
+        production_gridsize = None
 
     if backend == "vina":
         if num_cores is not None and num_cores <= 0:
@@ -364,21 +369,34 @@ def run_find_pocket(
 prompt_path = Path(__file__).parent / "docking_agent_prompt.md"
 system_prompt = prompt_path.read_text()
 
-docking_agent = Agent(
-    model="gpt-5.2",
-    name="Molecular Docking Agent",
-    tools=[
-        read_reference_file,
-        file_parser_agent.as_tool(
-            tool_name="file_parser_agent",
-            tool_description=(
-                "An agent that extracts structured statistics from docking results to enable parameter extraction. "
-                "Use this agent to analyze docking results CSV files to extract affinity statistics, pose counts, "
-                "and pocket analysis. Can help determine optimal parameters based on docking results."
-            ),
-        ),
-        run_docking,
-        run_find_pocket,
-    ],
-    instructions=system_prompt,
-)
+_docking_agent = None
+_docking_model = None
+
+
+def get_docking_agent():
+    global _docking_agent, _docking_model
+    current_model = get_current_model_name()
+    if _docking_agent is None or _docking_model != current_model:
+        _docking_agent = Agent(
+            model=get_resolved_model(),
+            name="Molecular Docking Agent",
+            tools=[
+                read_reference_file,
+                read_plan_document,
+                append_to_plan_section,
+                contribute_stage_to_plan,
+                get_file_parser_agent().as_tool(
+                    tool_name="file_parser_agent",
+                    tool_description=(
+                        "An agent that extracts structured statistics from docking results. "
+                        "Use this agent to analyze docking results CSV files to extract affinity statistics, pose counts, "
+                        "and pocket analysis. Use the returned evidence for downstream reasoning rather than asking it to choose parameters."
+                    ),
+                ),
+                run_docking,
+                run_find_pocket,
+            ],
+            instructions=system_prompt,
+        )
+        _docking_model = current_model
+    return _docking_agent

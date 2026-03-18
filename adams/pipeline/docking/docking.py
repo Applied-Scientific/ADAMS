@@ -104,11 +104,12 @@ class BaseDockingPipeline(PoseCollectionMixin):
         self.num_poses = num_poses
         self.minimized_dock = minimized_dock
         self.search_gridsize = search_gridsize
-        self.production_gridsize = production_gridsize
-        if self.production_gridsize is not None and self.production_gridsize <= 0:
-            raise ValueError(
-                f"production_gridsize must be > 0 when provided, got: {self.production_gridsize}"
-            )
+        # Treat 0 as "use default" so callers passing 0 get backend default instead of error
+        self.production_gridsize = (
+            None
+            if (production_gridsize is not None and production_gridsize <= 0)
+            else production_gridsize
+        )
         self.lock_grid_center = lock_grid_center
         self.search_margin = search_margin
         self.out_folder = out_folder

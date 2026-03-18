@@ -28,6 +28,11 @@ _agent_data_path: ContextVar[Optional[Path]] = ContextVar(
     "agent_data_path", default=None
 )
 
+# Current run's session ID (set when tracing starts; used by workflow wrapper for plan linking)
+_current_session_id: ContextVar[Optional[str]] = ContextVar(
+    "current_session_id", default=None
+)
+
 
 def validate_path_safety(target_path: Path, base_path: Optional[Path] = None) -> None:
     """
@@ -185,6 +190,21 @@ def resolve_path_from_input(
         return Path.cwd() / "agent_data"
 
 
+def set_current_session_id(session_id: Optional[str]) -> None:
+    """Set the current run's session ID (from the trace processor).
+
+    Called by setup_tracing() when a session starts. The workflow wrapper uses
+    this for linking plan_paths to the session, so we don't rely on the agent
+    to pass the correct session_id.
+    """
+    _current_session_id.set(session_id)
+
+
+def get_current_session_id() -> Optional[str]:
+    """Return the current run's session ID if set (e.g. by setup_tracing)."""
+    return _current_session_id.get()
+
+
 def reset_paths() -> None:
     """Reset the path configuration.
 
@@ -199,3 +219,4 @@ def reset_paths() -> None:
         >>> set_agent_data_path("/new/path")  # Must set path again
     """
     _agent_data_path.set(None)
+    _current_session_id.set(None)

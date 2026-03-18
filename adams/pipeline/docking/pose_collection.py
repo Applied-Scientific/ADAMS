@@ -173,6 +173,24 @@ class PoseCollectionMixin:
             f"Saved best pose per parent ligand to {parent_csv}"
         )
 
+        # 1b) One globally best entity per parent ligand, ranked across ligands.
+        df_parent_ranked = (
+            df_best_named.sort_values(by=["affinity", "Parent_ID", "ID", "grid_id"])
+            .groupby(["Parent_ID"], as_index=False)
+            .first()
+            .sort_values(by=["affinity", "Parent_ID", "ID", "grid_id"])
+            .reset_index(drop=True)
+        )
+        df_parent_ranked.insert(0, "rank_overall", range(1, len(df_parent_ranked) + 1))
+        df_parent_ranked.insert(1, "LigandName", df_parent_ranked["Parent_ID"].astype(str))
+        parent_ranked_csv = os.path.join(
+            summaries_dir, "production_best_entity_per_ligand_ranked.csv"
+        )
+        df_parent_ranked.to_csv(parent_ranked_csv, index=False)
+        self.logger.info(
+            f"Saved globally ranked best entity per parent ligand to {parent_ranked_csv}"
+        )
+
         # 2) Pose manifest for direct loading in visualization tools.
         manifest_cols = [
             "Parent_ID",

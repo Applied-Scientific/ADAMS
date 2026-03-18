@@ -437,7 +437,7 @@ def write_pdb_with_chain_breaks(
     if not gap_positions:
         # No gaps, use standard PDB writing
         with open(output_path, 'w') as f:
-            PDBFile.writeFile(fixer.topology, fixer.positions, f)
+            PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
         return
     
     # Find the target chain and get residues
@@ -450,14 +450,14 @@ def write_pdb_with_chain_breaks(
     if target_chain is None:
         # Chain not found, use standard writing
         with open(output_path, 'w') as f:
-            PDBFile.writeFile(fixer.topology, fixer.positions, f)
+            PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
         return
     
     residues = list(target_chain.residues())
     if len(residues) < 2:
         # No gaps possible
         with open(output_path, 'w') as f:
-            PDBFile.writeFile(fixer.topology, fixer.positions, f)
+            PDBFile.writeFile(fixer.topology, fixer.positions, f, keepIds=True)
         return
     
     # Build set of residue identifiers that come after gaps
@@ -477,7 +477,7 @@ def write_pdb_with_chain_breaks(
     # Write to temporary file first
     with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as temp_file:
         temp_path = temp_file.name
-        PDBFile.writeFile(fixer.topology, fixer.positions, temp_file)
+        PDBFile.writeFile(fixer.topology, fixer.positions, temp_file, keepIds=True)
     
     try:
         # Read the temporary PDB file

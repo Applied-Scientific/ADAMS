@@ -5,7 +5,7 @@ This document contains example prompts and workflows for common pipeline scenari
 
 ## General Principles for Stage Transitions
 
-These principles apply to the preprocessing → docking transition and should be followed consistently:
+These principles apply to ALL stage transitions (preprocessing → docking → MD) and should be followed consistently:
 
 ### Principle 1: Explicit Output Folder Path Passing
 - **CRITICAL**: Always explicitly include the output folder path in your natural language instruction to each agent
@@ -13,6 +13,7 @@ These principles apply to the preprocessing → docking transition and should be
 - **Examples**:
   - Preprocessing: "Use {output_folder} as the outpath for all preprocessing operations"
   - Docking: "Use {output_folder} as the out_folder for all docking operations"
+  - MD: "Use {output_folder} as the md_workdir for all MD operations"
 - **Why**: Agents have default paths (like "./output") that are WRONG - you must override them
 - **Verification**: After each stage completes, verify paths use your run directory, not defaults
 
@@ -26,6 +27,7 @@ These principles apply to the preprocessing → docking transition and should be
 - **Key Paths to Extract**:
   - From preprocessing: cleaned receptor path; **mapping CSV path** (docking_ready_ligands.csv from run_smiles_to_pdbqt or run_standardize_ligand_data for 3D) — use as **input_data** for docking
   - From docking: production docking results CSV path, docking centers CSV path
+  - From MD: pose directories, report paths (for mid-pipeline resumes)
 - **Why**: Agents return exact paths - reconstructing paths can lead to errors
 
 ### Principle 2b: Docking Input Readiness
@@ -40,13 +42,14 @@ These principles apply to the preprocessing → docking transition and should be
 - **Required Parameters by Stage**:
   - Preprocessing: input_pdb, input_data, outpath (explicit)
   - Docking: receptor, input_data, out_folder (explicit), plus any docking-specific params
+  - MD: protein_file, docking_csv, ligand_input, md_workdir (explicit), plus MD-specific params
 - **Why**: Agents should execute immediately, not wait for additional input
 
 ### Principle 4: Consistent Output Root Directory
 - **CRITICAL**: All stages must use the SAME output_root directory
 - **Process**:
   1. Create run directory once (or use provided output folder)
-  2. Use this EXACT path for: outpath (preprocessing), out_folder (docking)
+  2. Use this EXACT path for: outpath (preprocessing), out_folder (docking), md_workdir (MD)
   3. Never mix different output directories across stages
 - **Verification**: All file paths should contain the same root directory path
 - **Why**: Files from one stage are inputs to the next - they must be in the same location
@@ -77,14 +80,15 @@ These principles apply to the preprocessing → docking transition and should be
 **User Request**: "Run the complete docking workflow. Clean the receptor at {receptor_path} keeping chain {chain}, preprocess compounds in {ligand_csv_path} with a {molwt_upper_bound} Da cutoff without sampling. Discover top {N} binding sites, then dock at those sites."
 
 **Applying General Principles**:
-- **Principle 1**: Explicitly pass output_folder to preprocessing and docking
+- **Principle 1**: Explicitly pass output_folder to preprocessing, docking, and MD
 - **Principle 2**: Extract cleaned receptor and ligand CSV from preprocessing before docking
-- **Principle 4**: Use same output_folder across both stages
-- **Principle 5**: Automatic progression through preprocessing → docking without stopping
+- **Principle 3**: Provide all MD parameters (protein_file, docking_csv, ligand_input, md_workdir) in single call
+- **Principle 4**: Use same output_folder across all three stages
+- **Principle 5**: Automatically proceed preprocessing → docking → MD without stopping
 
 **Workflow Agent Prompt**:
 ```
-Please run the ENTIRE end-to-end workflow. First, clean the receptor at {receptor_path} keeping chain {chain} and also preprocess the compounds in {ligand_csv_path} with a {molwt_upper_bound} Da cutoff without sampling. Use {output_folder} as the outpath for all preprocessing operations. Next, discover binding sites for the ligands and dock them at the top {N} sites, using search gridsize of {gridsize} and search margin of {margin}, using {output_folder} as the out_folder. I want to use all cores (no GPU).
+Please run the ENTIRE end-to-end workflow. First, clean the receptor at {receptor_path} keeping chain {chain} and also preprocess the compounds in {ligand_csv_path} with a {molwt_upper_bound} Da cutoff without sampling. Use {output_folder} as the outpath for all preprocessing operations. Next, discover binding sites for the ligands and dock them at the top {N} sites, using search gridsize of {gridsize} and search margin of {margin}, using {output_folder} as the out_folder. Finally, run the stability MD pipeline (protein topology, ligand preparation from docking results, GROMACS MD, and stability analysis) using protein_file={cleaned_receptor_path}, docking_csv={docking_results_csv}, ligand_input={ligand_csv}, and md_workdir={output_folder}. I want to use all cores (no GPU).
 ```
 
 ---
@@ -94,21 +98,22 @@ Please run the ENTIRE end-to-end workflow. First, clean the receptor at {recepto
 **User Request**: "Run the complete docking workflow with GPU acceleration."
 
 **Applying General Principles**:
-- **Principle 1**: Explicitly pass output_folder to both stages
+- **Principle 1**: Explicitly pass output_folder to all stages
 - **Principle 2**: Extract paths between stages
+- **Principle 3**: Provide all MD parameters upfront
 - **Principle 4**: Use same output_folder throughout
-- **Principle 5**: Automatic progression through both stages
+- **Principle 5**: Automatic progression through all stages
 
 **Workflow Agent Prompt**:
 ```
-Please run the ENTIRE end-to-end workflow. First, clean the receptor at {receptor_path} keeping chain {chain} and also preprocess the compounds in {ligand_csv_path} with a {molwt_upper_bound} Da cutoff without sampling. Use {output_folder} as the outpath for all preprocessing operations. Next, discover binding sites for the ligands and dock them at the top {N} sites, using {output_folder} as the out_folder. Enable GPU for docking. I want to use all cores and GPUs when applicable. Use GPU for production docking.
+Please run the ENTIRE end-to-end workflow. First, clean the receptor at {receptor_path} keeping chain {chain} and also preprocess the compounds in {ligand_csv_path} with a {molwt_upper_bound} Da cutoff without sampling. Use {output_folder} as the outpath for all preprocessing operations. Next, discover binding sites for the ligands and dock them at the top {N} sites, using {output_folder} as the out_folder. Finally, run the stability MD pipeline using protein_file={cleaned_receptor_path}, docking_csv={docking_results_csv}, ligand_input={ligand_csv}, and md_workdir={output_folder}. Enable GPU/CUDA acceleration (gromacs_binary_type=\"cuda\", GroConfig.gpu=True). I want to use all cores and GPUs when applicable. Use GPU for production docking.
 ```
 
 ---
 
 ## Example 3: Docking Only (Data Already Prepared)
 
-**User Request**: "Run only the docking pipeline (no preprocessing) with the ligands from {ligand_csv_path} and the protein {receptor_path}. First discover the binding sites, then dock all ligands at the top {N} sites."
+**User Request**: "Run only the docking pipeline (no preprocessing or MD) with the ligands from {ligand_csv_path} and the protein {receptor_path}. First discover the binding sites, then dock all ligands at the top {N} sites."
 
 **Applying General Principles**:
 - **Principle 1**: Explicitly pass output_folder to docking agent
@@ -116,7 +121,7 @@ Please run the ENTIRE end-to-end workflow. First, clean the receptor at {recepto
 
 **Workflow Agent Prompt**:
 ```
-Please run only the docking pipeline (no preprocessing) with the ligands from {ligand_csv_path} and the protein {receptor_path}. First discover the binding sites, then dock all ligands at the top {N} sites. Use {output_folder} as the out_folder for all docking operations. I want to use all cores and GPUs when applicable. Use GPU for production docking.
+Please run only the docking pipeline (no preprocessing or MD) with the ligands from {ligand_csv_path} and the protein {receptor_path}. First discover the binding sites, then dock all ligands at the top {N} sites. Use {output_folder} as the out_folder for all docking operations. I want to use all cores and GPUs when applicable. Use GPU for production docking.
 ```
 
 ---
@@ -135,12 +140,28 @@ Run production docking with ligands from {ligand_csv_path} with the protein {rec
 
 ---
 
+## Example 5: MD Analysis Only (Using Existing Docking Results)
+
+**User Request**: "Run MD analysis on my docking results."
+
+**Applying General Principles**:
+- **Principle 1**: Explicitly pass md_workdir to MD agent
+- **Principle 3**: Provide all required MD parameters (protein_file, docking_csv, ligand_input, md_workdir) in single call
+- **Principle 4**: Use consistent output folder
+
+**Workflow Agent Prompt**:
+```
+Please run the stability MD pipeline (protein topology, ligand preparation from docking results, GROMACS MD, and stability analysis) using protein_file={receptor_path}, docking_csv={docking_results_csv}, ligand_input={ligand_csv_path}, and md_workdir={output_folder}. I want to use all cores and GPUs when applicable.
+```
+
+---
+
 ## Example 6: Complete Workflow with Sampling
 
 **User Request**: "Run the complete docking workflow with 50% sampling."
 
 **Applying General Principles**:
-- **Principle 1**: Explicitly pass output_folder to both stages
+- **Principle 1**: Explicitly pass output_folder to all stages
 - **Principle 2**: Extract sampled CSV path from preprocessing (not small_mw)
 - **Principle 4**: Use same output_folder throughout
 - **Principle 5**: Automatic progression through stages
@@ -152,7 +173,40 @@ Please run the complete docking workflow. Clean the receptor at {receptor_path} 
 
 ---
 
-## Example 7: Mid-Pipeline Start - Production Docking Only (Skip Search, with Coordinates)
+## Example 7: Mid-Pipeline Start - Resume at MD with External Docking Results
+
+**User Request**: "I have completed docking externally. Run MD analysis starting from ligand preparation."
+
+**Workflow Agent Prompt**:
+```
+I have completed docking externally. Run MD analysis starting from ligand preparation. Docking results folder: {docking_results_folder}, SMILES file: {ligand_csv_path}, protein topology files: protein_gro={protein_gro_path}, protein_top={protein_top_path}. Use {output_folder} as the md_workdir. I want to use all cores.
+```
+
+---
+
+## Example 8: Mid-Pipeline Start - Resume at Gro (MD Simulations Only)
+
+**User Request**: "Ligand preparation is complete. Run MD simulations on these pose directories."
+
+**Workflow Agent Prompt**:
+```
+Ligand preparation is complete. Run MD simulations on these pose directories: {pose_dir1}, {pose_dir2}, {pose_dir3} in {md_workdir}/md_analysis/poses/. Use pose_dirs={comma_separated_pose_dirs}. I want to use all cores.
+```
+
+---
+
+## Example 9: Mid-Pipeline Start - Stability Analysis Only
+
+**User Request**: "MD simulations are complete. Run stability analysis only on the completed trajectories."
+
+**Workflow Agent Prompt**:
+```
+MD simulations are complete. Run stability analysis only on the completed trajectories at {md_workdir}. Use pose_dirs_analysis={comma_separated_pose_dirs} if specific poses needed. I want to use all cores.
+```
+
+---
+
+## Example 10: Mid-Pipeline Start - Production Docking Only (Skip Search, with Coordinates)
 
 **User Request**: "The receptor and compounds are already prepared, and I have binding site coordinates. Run production docking only."
 
@@ -170,6 +224,22 @@ The receptor and compounds are already prepared, and I have binding site coordin
 **Workflow Agent Prompt**:
 ```
 The receptor and compounds are already prepared, and I have a docking centers file from a previous search. Run production docking only with ligands from {ligand_csv_path} and receptor {receptor_path}. Use docking_centers_file={docking_centers_csv_path}. Use {output_folder} as output. I want to use all cores and GPUs when applicable. Use GPU for production docking.
+```
+
+---
+
+## Example 12: Mid-Pipeline Start - Start at ProteinTopology (Skip Preprocessing and Docking)
+
+**User Request**: "Preprocessing and docking are complete. Run the full MD pipeline starting from protein topology."
+
+**Applying General Principles**:
+- **Principle 1**: Explicitly pass md_workdir to MD agent
+- **Principle 3**: Provide all required MD parameters (protein_file, docking_csv, ligand_input, md_workdir) in single call
+- **Principle 4**: Use consistent output folder (should match where preprocessing/docking outputs are)
+
+**Workflow Agent Prompt**:
+```
+Preprocessing and docking are complete. Run the full MD pipeline starting from protein topology. Use protein_file={receptor_path}, docking_csv={docking_results_csv}, ligand_input={ligand_csv_path}, and md_workdir={output_folder}. I want to use all cores.
 ```
 
 ---

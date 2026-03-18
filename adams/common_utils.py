@@ -128,8 +128,17 @@ def run_cmd(
             process.stdin.write(input_str)
             process.stdin.close()
 
-        # Wait for process to complete
-        returncode = process.wait()
+        # Wait for process to complete; on interrupt, kill the subprocess first
+        try:
+            returncode = process.wait()
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
 
         # Close pipes to signal EOF to reader threads
         # This ensures threads see EOF immediately and exit naturally
@@ -138,8 +147,8 @@ def run_cmd(
 
         # Wait for logging threads to finish reading all buffered output
         # Threads will exit naturally when they see EOF (empty string from readline)
-        stdout_thread.join()
-        stderr_thread.join()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
 
         stdout_str = "".join(stdout_lines)
         stderr_str = "".join(stderr_lines)

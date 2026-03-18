@@ -7,6 +7,12 @@ import pandas as pd
 from agents import Agent, function_tool
 
 from ..references.reference_file_reader import read_reference_file
+from ...model_config import get_current_model_name, get_resolved_model
+from ...user_plan_utils import (
+    append_to_plan_section,
+    contribute_stage_to_plan,
+    read_plan_document,
+)
 from ..charge_model import validate_charge_model
 from .clean_pdb import CleanPDB
 from .ligand_preprocessing import LigandPreprocessor
@@ -179,6 +185,8 @@ def run_clean_pdb(
     outpath: str = "./output",
     ligand: bool = False,
     chain_to_keep: Optional[Union[str, Sequence[str]]] = "all",
+    residue_range_start: Optional[int] = None,
+    residue_range_end: Optional[int] = None,
     keep_water: bool = False,
     keep_heterogens: Optional[Union[Sequence[str], str]] = "essential",
     model_missing_residues: bool = True,
@@ -229,6 +237,11 @@ def run_clean_pdb(
             - "all" or None (default): keep all chains
             - "A": keep one chain
             - "A,B,C" or ["A","B","C"]: keep selected chains
+        residue_range_start: Optional inclusive lower bound for residue sequence
+            numbers (PDB `resseq`) applied to ATOM/HETATM filtering before fixing.
+            Example: 544.
+        residue_range_end: Optional inclusive upper bound for residue sequence
+            numbers (PDB `resseq`). Example: 667.
 
         keep_water (bool): If True, retain water molecules (e.g. structural waters).
             Default: False.
@@ -253,7 +266,9 @@ def run_clean_pdb(
         >>> run_clean_pdb(
         ...     input_pdb="protein.pdb",
         ...     outpath="./cleaned",
-        ...     chain_to_keep="A,B,C"
+        ...     chain_to_keep="A,B,C",
+        ...     residue_range_start=544,
+        ...     residue_range_end=667
         ... )
         # Outputs: "./cleaned/cleaned_protein.pdb"
 
@@ -280,6 +295,8 @@ def run_clean_pdb(
         outpath=outpath,
         ligand=ligand,
         chain_to_keep=chain_to_keep,
+        residue_range_start=residue_range_start,
+        residue_range_end=residue_range_end,
         keep_water=keep_water,
         keep_heterogens=keep_heterogens,
         model_missing_residues=model_missing_residues,
@@ -298,6 +315,7 @@ def run_protonate_receptor(
     pH: float = 7.4,
     ff: str = "AMBER",
     ffout: str = "AMBER",
+    warning_strict: bool = False,
 ) -> Dict[str, str]:
     """
     Protonate receptor PDB using PDB2PQR with PROPKA.
@@ -306,7 +324,7 @@ def run_protonate_receptor(
     - HETATM records (e.g., kept crystallographic waters/cofactors from run_clean_pdb)
       are preserved in the protonated PDB output.
 
-    MANDATORY step after run_clean_pdb. Must be called before docking.
+    MANDATORY step after run_clean_pdb. Must be called before docking/MD.
 
     Args:
         input_pdb: Path to cleaned PDB file (from run_clean_pdb, without hydrogens)
@@ -314,9 +332,16 @@ def run_protonate_receptor(
         pH: pH value for protonation (default: 7.4)
         ff: Force field (default: "AMBER")
         ffout: Output force field (default: "AMBER")
+        warning_strict: If True, fail when critical protonation warnings are detected.
+            Default False keeps warnings non-blocking while still writing warning reports.
 
     Returns:
-        Dict[str, str]: {'protonated_pdb': path, 'protonated_pqr': path}
+        Dict[str, str]: {
+            'protonated_pdb': path,
+            'protonated_pqr': path,
+            'pdb2pqr_warnings_csv': path,
+            'pdb2pqr_warning_summary': path,
+        }
     """
     import os
     from ..file_organization import setup_preprocessing_dirs
@@ -346,19 +371,47 @@ def run_protonate_receptor(
         f"{input_pdb} -> {output_pdb}"
     )
 
-    # Run PDB2PQR with PROPKA
-    protonated_pdb, protonated_pqr = run_pdb2pqr(
-        input_pdb=input_pdb,
-        output_pqr=output_pqr,
-        output_pdb=output_pdb,
-        pH=pH,
-        ff=ff,
-        ffout=ffout,
-    )
+    # Run PDB2PQR with PROPKA.
+    # Backward compatibility: older runtime copies of run_pdb2pqr do not accept
+    # warning_strict; retry once without the keyword if needed.
+    try:
+        (
+            protonated_pdb,
+            protonated_pqr,
+            warnings_csv_path,
+            warning_summary_path,
+        ) = run_pdb2pqr(
+            input_pdb=input_pdb,
+            output_pqr=output_pqr,
+            output_pdb=output_pdb,
+            pH=pH,
+            ff=ff,
+            ffout=ffout,
+            warning_strict=warning_strict,
+        )
+    except TypeError as e:
+        if "unexpected keyword argument 'warning_strict'" not in str(e):
+            raise
+        print(
+            "[Agent] Runtime uses legacy run_pdb2pqr signature; "
+            "retrying protonation without warning_strict."
+        )
+        protonated_pdb, protonated_pqr = run_pdb2pqr(
+            input_pdb=input_pdb,
+            output_pqr=output_pqr,
+            output_pdb=output_pdb,
+            pH=pH,
+            ff=ff,
+            ffout=ffout,
+        )
+        warnings_csv_path = ""
+        warning_summary_path = ""
 
     return {
         "protonated_pdb": protonated_pdb,
         "protonated_pqr": protonated_pqr,
+        "pdb2pqr_warnings_csv": warnings_csv_path,
+        "pdb2pqr_warning_summary": warning_summary_path,
     }
 
 
@@ -410,7 +463,7 @@ def run_ligand_preprocessing(
         - {outpath}/ligands/{prefix}_largeMW.csv: Compounds above MW upper bound
         - {outpath}/ligands/{prefix}_tooSmallMW.csv: Compounds below MW lower bound
         - {outpath}/ligands/{prefix}_frac{sampling_frac}.csv: Sampled dataset (if sampling=True)
-          (Used by Docking Agent: as ligand_input parameter)
+          (Used by Docking Agent and MD Agent: as ligand_input parameter)
 
     Use this when you need to:
     - Filter large compound libraries by molecular weight
@@ -560,17 +613,30 @@ def run_ligand_preprocessing(
 prompt_path = Path(__file__).parent / "preprocessing_agent_prompt.md"
 system_prompt = prompt_path.read_text()
 
-preprocessing_agent = Agent(
-    model="gpt-5.2",
-    name="Receptor and Ligand Preparation Agent",
-    tools=[
-        read_reference_file,
-        run_standardize_ligand_data,
-        run_smiles_to_pdbqt,
-        run_clean_pdb,
-        run_protonate_receptor,
-        run_ligand_preprocessing,
-        run_python_code,
-    ],
-    instructions=system_prompt,
-)
+_preprocessing_agent = None
+_preprocessing_model = None
+
+
+def get_preprocessing_agent():
+    global _preprocessing_agent, _preprocessing_model
+    current_model = get_current_model_name()
+    if _preprocessing_agent is None or _preprocessing_model != current_model:
+        _preprocessing_agent = Agent(
+            model=get_resolved_model(),
+            name="Receptor and Ligand Preparation Agent",
+            tools=[
+                read_reference_file,
+                read_plan_document,
+                append_to_plan_section,
+                contribute_stage_to_plan,
+                run_standardize_ligand_data,
+                run_smiles_to_pdbqt,
+                run_clean_pdb,
+                run_protonate_receptor,
+                run_ligand_preprocessing,
+                run_python_code,
+            ],
+            instructions=system_prompt,
+        )
+        _preprocessing_model = current_model
+    return _preprocessing_agent

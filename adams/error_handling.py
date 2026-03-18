@@ -78,16 +78,17 @@ class GPUExecutionError(PerLigandError):
 
 class PerPoseError(PerLigandError):
     """
-    Error affecting a single pose in batch processing (inherits per-ligand semantics).
+    Error affecting a single MD pose (inherits per-ligand semantics).
 
-    When a pose fails, the pipeline should skip it and continue with remaining poses.
+    MD poses are treated like ligands - when a pose fails, the pipeline
+    should skip it and continue with remaining poses.
     """
 
     pass
 
 
 class GROMACSExecutionError(PerPoseError):
-    """Error executing GROMACS subprocess (reserved for future use)."""
+    """Error executing GROMACS subprocess (grompp, mdrun, etc.)."""
 
     pass
 

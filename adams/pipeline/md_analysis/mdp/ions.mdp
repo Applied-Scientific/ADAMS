@@ -1,0 +1,5 @@
+; ions.mdp - used only by grompp to build a .tpr for genion (no mdrun)
+; nsteps = 0 is intentional: we only need a valid TPR so genion can replace solvent with ions.
+integrator = steep
+emtol = 1000.0
+nsteps = 0

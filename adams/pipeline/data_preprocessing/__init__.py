@@ -7,7 +7,7 @@ from .microstate_enumeration import (
     enumerate_stereoisomers,
     enumerate_tautomers,
 )
-from .preprocessing_agent import preprocessing_agent
+from .preprocessing_agent import get_preprocessing_agent
 from .python_executor import run_python_in_conda
 from .standardize_ligands import standardize_ligand_data
 
@@ -18,7 +18,7 @@ __all__ = [
     "enumerate_protonation_states",
     "enumerate_stereoisomers",
     "enumerate_tautomers",
-    "preprocessing_agent",
+    "get_preprocessing_agent",
     "run_python_in_conda",
     "standardize_ligand_data",
 ]

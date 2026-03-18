@@ -1,5 +1,5 @@
 # File parser agent package
 
-from .file_parser_agent import file_parser_agent
+from .file_parser_agent import get_file_parser_agent
 
-__all__ = ["file_parser_agent"]
+__all__ = ["get_file_parser_agent"]

@@ -1,64 +1,38 @@
 """
-    adams/helper_agents/oversight/oversight_agent.py
-
-    Oversight Agent - Reviews and validates pipeline execution plans
-    to ensure they are scientifically sound and align with user intent.
+Oversight Agent - Reviews and validates pipeline execution plans.
 """
 
 from pathlib import Path
 
 from agents import Agent, ModelSettings
 
+from ...model_config import get_current_model_name, get_resolved_model
+from ...pipeline.references.reference_file_reader import read_reference_file
+from ...user_plan_utils import read_plan_document
 from .oversight_tools import submit_review
 
 
-def _load_reference_files(*filenames: str) -> str:
-    """
-    Load reference markdown files and format them for embedding in system prompts.
-
-    Args:
-        *filenames: Names of reference files to load (e.g., "entry_points.md")
-
-    Returns:
-        Formatted string containing all reference file contents
-    """
-    references_dir = Path(__file__).parent.parent.parent / "pipeline" / "references"
-    sections = []
-
-    for filename in filenames:
-        file_path = references_dir / filename
-        if file_path.exists():
-            content = file_path.read_text(encoding="utf-8")
-            # Extract title from filename (e.g., "entry_points.md" -> "Entry Points")
-            title = filename.replace(".md", "").replace("_", " ").title()
-            sections.append(f"\n## {title}\n\n{content}")
-
-    if sections:
-        return "\n# Reference Documentation\n" + "\n".join(sections)
-    return ""
-
-
 prompt_path = Path(__file__).parent / "oversight_prompt.md"
-base_prompt = prompt_path.read_text()
+system_prompt = prompt_path.read_text()
 
-# Load and embed all 6 reference files needed for validation
-reference_docs = _load_reference_files(
-    "entry_points.md",
-    "workflow_examples.md",
-    "parameter_defaults.md",
-    "terminology.md",
-    "directory_structure.md",
-    "file_path_mapping.md",
-)
+_oversight_agent = None
+_oversight_model = None
 
-system_prompt = base_prompt + reference_docs
 
-oversight_agent = Agent(
-    model="gpt-5.2",
-    name="Oversight Agent",
-    instructions=system_prompt,
-    tools=[
-        submit_review,
-    ],
-    model_settings=ModelSettings(tool_choice="auto"),
-)
+def get_oversight_agent() -> Agent:
+    global _oversight_agent, _oversight_model
+    current_model = get_current_model_name()
+    if _oversight_agent is None or _oversight_model != current_model:
+        _oversight_agent = Agent(
+            model=get_resolved_model(),
+            name="Oversight Agent",
+            instructions=system_prompt,
+            tools=[
+                submit_review,
+                read_plan_document,
+                read_reference_file,
+            ],
+            model_settings=ModelSettings(tool_choice="auto"),
+        )
+        _oversight_model = current_model
+    return _oversight_agent

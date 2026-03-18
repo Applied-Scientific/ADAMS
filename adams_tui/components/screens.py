@@ -80,7 +80,7 @@ class ChatScreen(Container):
         with Vertical():
             with VerticalScroll(id="chat-history"):
                 yield ChatBubble(
-                    "Ready. I can run **molecular docking**, "
+                    "Ready. I can run **molecular docking**, **MD simulations**, "
                     "and **binding analysis**.\n\n"
                     "Try: *\"Dock 1M17.pdb against ligands_inSMILES.csv\"*",
                     sender="agent",
@@ -97,6 +97,22 @@ class ChatScreen(Container):
 
     def on_mount(self) -> None:
         self.query_one("#agent-input").focus()
+
+    def load_initial_history(self, conversation_history: list) -> None:
+        """Replace the default welcome bubble with resumed conversation history."""
+        if not conversation_history:
+            return
+        chat_container = self.query_one("#chat-history")
+        # Remove the default "Ready..." bubble (first child)
+        children = list(chat_container.children)
+        if children:
+            children[0].remove()
+        for item in conversation_history:
+            role = item.get("role", "user")
+            content = item.get("content", "")
+            sender = "user" if role == "user" else "agent"
+            chat_container.mount(ChatBubble(content, sender=sender))
+        chat_container.scroll_end(animate=False)
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if not event.value.strip():

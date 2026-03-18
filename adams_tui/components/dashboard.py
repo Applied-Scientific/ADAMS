@@ -18,7 +18,7 @@ class Dashboard(Container):
     """Dashboard view with system metrics, model tag, and agent stage indicator."""
 
     online = reactive(False)
-    current_model = reactive("gpt-5")
+    current_model = reactive("gpt-5.4")
     current_stage = reactive("Idle")
     cpu_percent = reactive(0.0)
     mem_percent = reactive(0.0)
@@ -67,21 +67,36 @@ class Dashboard(Container):
                 yield Label("[dim]Stage:[/] Idle", id="stage-label", classes="stage-indicator")
 
             # ── Model Selection Card ──
+            # Options: OpenAI (native), Anthropic/Google via LiteLLM (provider/model).
+            # See https://platform.openai.com/docs/models and LiteLLM docs for IDs.
             with Container(classes="card"):
                 yield Label("Model Selection", classes="card-title")
                 yield Select(
                     [
-                        ("GPT-5.2 (Reasoning)", "gpt-5.2"),
-                        ("GPT-5", "gpt-5"),
-                        ("GPT-5 Mini", "gpt-5-mini"),
+                        # ── OpenAI – IDs from platform.openai.com/docs/models (availability may vary by account) ──
+                        # Frontier / reasoning (may require tier access)
+                        ("GPT-5.4", "gpt-5.4"),
+                        ("GPT-5.4 Pro", "gpt-5.4-pro"),
+                        ("GPT-5.2", "gpt-5.2"),
+                        ("GPT-5.2 Pro", "gpt-5.2-pro"),
+                        ("GPT-5.2 Codex", "gpt-5.2-codex"),
+                        ("GPT-5.3 Codex", "gpt-5.3-codex"),
+                        # ── Anthropic (LiteLLM) – docs.litellm.ai/docs/providers/anthropic ──
+                        ("Claude Opus 4.6", "anthropic/claude-opus-4-6-20260205"),
+                        ("Claude Sonnet 4.6", "anthropic/claude-sonnet-4-6"),
+                        ("Claude Haiku 4.5", "anthropic/claude-haiku-4-5-20251001"),
                         ("Claude Sonnet 4.5", "anthropic/claude-sonnet-4-5-20250929"),
                         ("Claude Opus 4.5", "anthropic/claude-opus-4-5-20251101"),
+                        # ── Google Gemini (LiteLLM) – docs.litellm.ai/docs/providers/gemini; gemini/ prefix ──
                         ("Gemini 3 Pro Preview", "gemini/gemini-3-pro-preview"),
+                        ("Gemini 3.1 Flash Lite Preview", "gemini/gemini-3.1-flash-lite-preview"),
                         ("Gemini 2.5 Pro", "gemini/gemini-2.5-pro"),
+                        ("Gemini 2.5 Flash", "gemini/gemini-2.5-flash"),
+                        ("Gemini 2.5 Flash Lite", "gemini/gemini-2.5-flash-lite"),
                     ],
                     prompt="Select Model",
                     id="model-select",
-                    value="gpt-5",
+                    value="gpt-5.4",
                 )
 
             # ── Session Info Card ──

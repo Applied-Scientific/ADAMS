@@ -38,4 +38,4 @@ The `agent_data/` directory is mounted from your local machine to `/app/agent_da
 ## Troubleshooting
 
 - **GPU Support**: The default Dockerfile builds for CPU usage for broad compatibility. To use NVIDIA GPUs, you will need the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and may need to modify the Dockerfile to use a CUDA-enabled base image or install CUDA drivers.
-- **Performance**: Docker on macOS uses a VM. For heavy workloads, native installation (via `scripts/install.sh`) might offer better performance.
+- **Performance**: Docker on macOS uses a VM. For heavy MD simulations, native installation (via `scripts/install.sh`) might offer better performance.

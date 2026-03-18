@@ -1,0 +1,50 @@
+; membrane_npt_eq3.mdp - NPT equilibration stage 3 (weak POSRES force constants)
+; Uses POSRES_FC200 includes generated from imported topology POSRES files
+title                   = Membrane NPT equilibration stage 3
+define                  = -DPOSRES_FC200
+; Run parameters
+integrator              = md
+nsteps                  = 100000    ; 2 * 100000 = 200 ps
+dt                      = 0.002
+; Output control
+nstenergy               = 500
+nstlog                  = 500
+nstxout-compressed      = 500
+; Bond parameters
+continuation            = yes
+constraint_algorithm    = lincs
+constraints             = h-bonds
+lincs_iter              = 1
+lincs_order             = 4
+; Neighbor searching and vdW
+cutoff-scheme           = Verlet
+ns_type                 = grid
+nstlist                 = 20
+rlist                   = 1.2
+vdwtype                 = cutoff
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+; Electrostatics
+coulombtype             = PME
+rcoulomb                = 1.2
+pme_order               = 4
+fourierspacing          = 0.16
+; Temperature coupling
+tcoupl                  = V-rescale
+tc-grps                 = Protein Membrane Solvent_and_ions
+tau_t                   = 0.1     0.1      0.1
+ref_t                   = 300     300      300
+; Pressure coupling - semi-isotropic for membrane
+pcoupl                  = C-rescale
+pcoupltype              = semiisotropic
+tau_p                   = 5.0
+ref_p                   = 1.0     1.0
+compressibility         = 4.5e-5  4.5e-5
+refcoord_scaling        = com
+; Periodic boundary conditions
+pbc                     = xyz
+; Dispersion correction
+DispCorr                = no
+; Velocity generation
+gen_vel                 = no

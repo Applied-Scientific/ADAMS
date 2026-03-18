@@ -18,6 +18,10 @@ MODULE_TO_STAGE = {
     "GPU Docking Inference": "docking",
     "Search Inference": "docking",
     "Find Pocket": "docking",
+    "Protein Topology": "md_analysis",
+    "Ligand Preparation": "md_analysis",
+    "MD Simulation": "md_analysis",
+    "Stability Analysis": "md_analysis",
 }
 
 
@@ -37,7 +41,7 @@ def parse_log_file_impl(log_file: Optional[str] = None) -> Dict[str, Any]:
         - log_file: Path to the log file parsed
         - steps: List of step dictionaries with:
             - name: Step name (module name)
-            - stage: Pipeline stage (preprocessing, docking)
+            - stage: Pipeline stage (preprocessing, docking, md_analysis)
             - started: Start timestamp
             - completed: Completion timestamp (or None if incomplete)
             - duration_sec: Duration in seconds (or None if incomplete)

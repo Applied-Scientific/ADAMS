@@ -27,18 +27,16 @@ def search_previous_sessions(query: str) -> dict:
 @function_tool
 def get_session_plan_summary(session_id: str) -> dict:
     """
-    Get a brief plan/request summary for a session (FAST). Returns session metadata
-    plus plan_pairs: each pair has user_request_block (concatenated user messages
-    leading to that plan) and approved_plan (the exact plan only, as returned by oversight). Use this
-    FIRST when reviewing a past session; if you need more context (run state, errors,
-    full trace analysis), use get_session_info(session_id) to get the trace file path,
-    then call meta_analysis_agent with that path.
+    Get session metadata only (no trace parsing). Returns session_id, description,
+    tags, timestamp, and plan_paths (list; a session can have multiple).
+    When plan_paths is present, use read_plan_document(plan_path) for each or the most relevant.
+    For trace/log analysis or current-run error solving, use meta_analysis_agent.
 
     Args:
         session_id: Session ID (format: YYYYMMDD_HHMMSS)
 
     Returns:
-        dict: session_id, description, tags, timestamp, plan_pairs, error (if any)
+        dict: session_id, description, tags, timestamp, plan_paths (list), error (if any)
     """
     return _sm.get_session_plan_summary(session_id)
 
@@ -93,7 +91,7 @@ def set_session_tags_tool(session_id: str, tags: list[str]) -> dict:
 
     Use whenever it helps discovery: when a workflow completes, when you
     categorize a session, or when revisiting past sessions. Workflow type
-    (e.g. "docking", "preprocessing"), status ("completed",
+    (e.g. "docking", "md_analysis", "preprocessing"), status ("completed",
     "error", "incomplete"), and topic tags. Replaces existing tags; use
     tag_session to add tags incrementally.
 
@@ -136,7 +134,7 @@ def get_all_session_tags() -> dict:
     
     Returns:
         dict: Dictionary mapping tag names to session counts
-            Example: {"docking": 5, "preprocessing": 3, "error_recovery": 2}
+            Example: {"docking": 5, "md_analysis": 3, "error_recovery": 2}
     """
     tags = _sm.get_all_tags()
     return {"tags": tags, "total_tags": len(tags)}
@@ -152,13 +150,13 @@ def get_sessions_by_tag(tag: str, limit: int = 20) -> dict:
     Use get_session_info() if you need full details for a specific session.
     
     Args:
-        tag: Tag to filter by (e.g., "docking", "preprocessing", "error_recovery")
+        tag: Tag to filter by (e.g., "docking", "md_analysis", "error_recovery")
         limit: Maximum number of sessions to return (default: 20)
     
     Returns:
         dict: Contains 'sessions' list with lightweight summaries
     """
-    summaries = _sm.get_session_summaries(tag=tag, limit=limit)
+    summaries = _sm.get_sessions_by_tag(tag, limit=limit)
     return {"tag": tag, "sessions": summaries, "count": len(summaries)}
 
 
@@ -188,7 +186,7 @@ def tag_session(session_id: str, tags: list[str]) -> dict:
     
     Use whenever it helps: when a workflow completes, when categorizing
     a session, or when revisiting past sessions. Relevant categories:
-    - Workflow type: "docking", "preprocessing"
+    - Workflow type: "docking", "md_analysis", "preprocessing"
     - Status: "completed", "error", "incomplete"
     - Topic: "protein_ligand", "mutation_analysis", "parameter_optimization"
     - User context: "resume_request", "debugging", "exploration"
@@ -292,25 +290,31 @@ def set_custom_memory(notes: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-# Export tools for agent
-MEMORY_TOOLS = [
-    # Hierarchical session discovery (fast, cheap)
-    get_all_session_tags,
-    get_sessions_by_tag,
-    get_session_summaries,
-    # Brief plan/request summary (use first when reviewing a session)
-    get_session_plan_summary,
-    # Session management
-    tag_session,
-    set_session_description_tool,
-    set_session_tags_tool,
-    # Detailed session access (slower, use after summaries)
-    get_session_info,
-    search_previous_sessions,
-    list_recent_sessions,
-    # Persistent memory
+# Persistent memory only (for executive: no session tools)
+PERSISTENT_MEMORY_TOOLS = [
     get_persistent_memory_tool,
     update_user_preference_tool,
     add_learned_behavior_tool,
     set_custom_memory,
 ]
+
+# Read-only session memory tools for diagnosis and retrieval.
+SESSION_MEMORY_READ_TOOLS = [
+    get_all_session_tags,
+    get_sessions_by_tag,
+    get_session_summaries,
+    get_session_plan_summary,
+    get_session_info,
+    search_previous_sessions,
+    list_recent_sessions,
+]
+
+# Full session memory tools, including metadata writes.
+SESSION_MEMORY_TOOLS = SESSION_MEMORY_READ_TOOLS + [
+    tag_session,
+    set_session_description_tool,
+    set_session_tags_tool,
+]
+
+# All memory tools (for backward compatibility where both are needed)
+MEMORY_TOOLS = PERSISTENT_MEMORY_TOOLS + SESSION_MEMORY_TOOLS

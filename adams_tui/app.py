@@ -1,8 +1,7 @@
-
 import asyncio
 import os
+import sys
 from pathlib import Path
-from datetime import datetime
 
 from textual.app import App, ComposeResult
 from textual.containers import Container
@@ -42,20 +41,23 @@ class AdamsApp(App):
         ("ctrl+c", "quit", "Quit"),
     ]
 
-    def __init__(self):
+    def __init__(self, continue_session_id=None):
         super().__init__()
         self.agent = None
         self.session = None
-        self.session_id = f"tui_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        self.continue_session_id = continue_session_id
+        # Canonical session_id is always sourced from the trace processor.
+        # For continue mode, this starts with the requested ID and is confirmed
+        # once tracing is initialized.
+        self.session_id = continue_session_id
         self.trace_processor = None
         self.system_online = False
-        self.selected_model = "gpt-5" # Default
+        self.selected_model = "gpt-5.4"  # Default
         self.provider_map = {
             "gpt": "OpenAI",
             "anthropic": "Anthropic",
             "gemini": "Gemini"
         }
-        self.trace_processor = None
         self.shutdown_manager = None
 
     def get_provider_for_model(self, model: str) -> str:
@@ -148,11 +150,24 @@ class AdamsApp(App):
                 working_dir = Path.cwd()
                 agent_data_path = working_dir / "agent_data"
                 set_agent_data_path(path=agent_data_path)
-                self.trace_processor = setup_tracing()
-                
-                # Create agent with selected model
-                self.agent = create_agent(model=model)
-                self.session = SQLiteSession(self.session_id)
+                is_continue = bool(self.continue_session_id)
+                # Use existing trace processor when re-initializing (e.g. model change)
+                # so we don't spawn a second trace file for the same session.
+                if self.trace_processor is None:
+                    if is_continue:
+                        self.trace_processor = setup_tracing(session_id=self.continue_session_id)
+                        self.session_id = self.trace_processor.session_id
+                        from adams.utils.session_utils import create_sdk_session
+                        self.session = create_sdk_session(self.session_id, is_continue=True)
+                    else:
+                        self.trace_processor = setup_tracing()
+                        self.session_id = self.trace_processor.session_id
+                        self.session = SQLiteSession(self.session_id)
+                else:
+                    # Re-initialization path (e.g., model switch): keep using the
+                    # same active trace session id for all metadata updates.
+                    self.session_id = self.trace_processor.session_id
+                self.agent = create_agent(session_id=self.session_id, model=model)
                 self.system_online = True
                 
                 # Setup graceful shutdown
@@ -160,13 +175,27 @@ class AdamsApp(App):
                     self.shutdown_manager = ShutdownManager()
                     
                     def cleanup_on_shutdown():
-                        """Cleanup callback for graceful shutdown."""
+                        """Cleanup callback: write session_end, finalize session status tag, then format trace."""
+                        tp = self.trace_processor
+                        if tp:
+                            try:
+                                tp.shutdown()
+                            except Exception:
+                                pass
+                            try:
+                                from adams.helper_agents.meta_analysis.trace_parser import parse_trace_file_impl
+                                from adams.memory.session_memory import add_session_tags
+                                result = parse_trace_file_impl(tp.filepath)
+                                if not result.get("error") and result.get("status"):
+                                    add_session_tags(tp.session_id, [result["status"]])
+                            except Exception:
+                                pass
                         try:
                             from adams.format_trace import format_trace_file
                             format_trace_file()
                         except Exception:
                             pass
-                    
+
                     self.shutdown_manager.register_cleanup(cleanup_on_shutdown)
                     self.shutdown_manager.setup_handlers()
                 
@@ -188,6 +217,18 @@ class AdamsApp(App):
                     monitor.set_trace_file(self.trace_processor.filepath)
                 except Exception:
                     pass
+
+                # When resuming a session, load conversation history into the chat view
+                if is_continue:
+                    try:
+                        from adams.memory.session_memory import continue_session
+                        data = continue_session(self.session_id)
+                        history = data.get("conversation_history") or []
+                        if history:
+                            chat_screen = self.query_one(ChatScreen)
+                            chat_screen.load_initial_history(history)
+                    except Exception:
+                        pass
                     
             except Exception as e:
                 self.notify(f"Initialization Failed: {e}", severity="error")
@@ -201,8 +242,20 @@ class AdamsApp(App):
             self.notify(error_msg, severity="error", timeout=10)
 
     def on_unmount(self) -> None:
-        """Format trace file on app exit (converts .jsonl -> .json)."""
+        """Write session_end, finalize session status tag, then format trace file on app exit."""
         if self.trace_processor:
+            try:
+                self.trace_processor.shutdown()
+            except Exception:
+                pass
+            try:
+                from adams.helper_agents.meta_analysis.trace_parser import parse_trace_file_impl
+                from adams.memory.session_memory import add_session_tags
+                result = parse_trace_file_impl(self.trace_processor.filepath)
+                if not result.get("error") and result.get("status"):
+                    add_session_tags(self.trace_processor.session_id, [result["status"]])
+            except Exception:
+                pass
             try:
                 from adams.format_trace import format_trace_file
                 format_trace_file()
@@ -388,6 +441,16 @@ def main():
     import atexit
     import signal
 
+    # Parse CLI args; run one-shot commands and exit, or launch TUI with optional resume.
+    from adams.cli import _parse_args, handle_instructions_command, handle_preferences_command
+    args = _parse_args(sys.argv[1:])
+    if args.command == "instructions":
+        handle_instructions_command(args)
+        return
+    if args.command == "preferences":
+        handle_preferences_command(args)
+        return
+
     # Suppress the noisy KeyboardInterrupt traceback from the SDK's
     # background tracing thread when the user presses Ctrl+C.
     _original_excepthook = None
@@ -407,7 +470,7 @@ def main():
 
     # Force UTF-8 encoding to prevent Unicode errors in TUI
     os.environ["PYTHONIOENCODING"] = "utf-8"
-    app = AdamsApp()
+    app = AdamsApp(continue_session_id=args.continue_session)
     try:
         app.run()
     except KeyboardInterrupt:

@@ -11,11 +11,8 @@ import os
 import pandas as pd
 
 from ...logger_utils import get_logger
-from ...utils.multiprocessing_utils import (
-    Pool,
-    can_start_multiprocessing,
-    cpu_count,
-)
+from ...utils.multiprocessing_utils import cpu_count
+from ...utils.parallel_executor import ParallelExecutor, ResourceConfig
 from ..charge_model import validate_charge_model
 
 
@@ -32,7 +29,7 @@ def _process_one_ligand(args):
     """
     Generate conformers for one molecule and write PDBQT files.
     Worker-friendly: takes a single tuple, returns
-    (success, paths, row_id, variant_id, parent_id, variant_type, error_msg).
+    (success, paths, smiles, row_id, variant_id, parent_id, variant_type, error_msg).
     """
     from meeko import MoleculePreparation, PDBQTWriterLegacy
     from rdkit import Chem
@@ -65,6 +62,7 @@ def _process_one_ligand(args):
         return (
             False,
             [],
+            smiles,
             str(row_id),
             variant_id,
             parent_id,
@@ -79,8 +77,8 @@ def _process_one_ligand(args):
     mol = AddHs(mol)
     params = rdDistGeom.ETKDGv2()
     params.randomSeed = random_seed
-    n = rdDistGeom.EmbedMultipleConfs(mol, num_confs, params)
-    if n == 0:
+    rdDistGeom.EmbedMultipleConfs(mol, num_confs, params)
+    if mol.GetNumConformers() == 0:
         return _err("Failed to embed molecule")
 
     clean_id = "".join(c if c.isalnum() else "_" for c in file_id)
@@ -103,6 +101,9 @@ def _process_one_ligand(args):
         except Exception:
             e = float("inf")
         conf_energy.append((cid, e))
+
+    if not conf_energy:
+        return _err("No conformers available after embedding")
 
     # Keep only low-energy conformers to avoid combinatorial blow-up.
     conf_energy.sort(key=lambda item: item[1])
@@ -141,6 +142,7 @@ def _process_one_ligand(args):
     return (
         True,
         paths,
+        smiles,
         str(row_id),
         variant_id,
         parent_id,
@@ -232,36 +234,29 @@ def generate_conformers_to_pdbqt(
     n_rows = len(args_list)
     n_workers = min(cpu_count(), n_rows) if n_rows else 1
 
-    multiprocessing_ok = can_start_multiprocessing()
-    if n_workers <= 1 or not multiprocessing_ok:
-        if n_workers > 1 and not multiprocessing_ok:
-            logger.info(
-                "Multiprocessing is unavailable in this runtime context; "
-                "falling back to serial conformer generation."
-            )
-        logger.info("Execution mode: serial")
-        logger.info("Generating conformers serially (1 worker)...")
-        results = [_process_one_ligand(args) for args in args_list]
-    else:
-        logger.info("Execution mode: multiprocessing")
-        logger.info(f"Generating conformers in parallel ({n_workers} workers)...")
-        with Pool(processes=n_workers) as pool:
-            results = pool.map(_process_one_ligand, args_list)
+    config = ResourceConfig(n_workers=n_workers)
+    executor = ParallelExecutor(config)
+
+    logger.info(f"Generating conformers for {n_rows} molecules...")
+    task_results = executor.run(
+        _process_one_ligand,
+        args_list,
+        task_id_fn=lambda a: str(a[7]),
+    )
 
     mapping_rows = []
-    for idx, (
-        success,
-        paths,
-        row_id,
-        variant_id,
-        parent_id,
-        variant_type,
-        err,
-    ) in enumerate(results):
+    for tr in task_results:
+        raw = tr.value if tr.success and tr.value is not None else None
+        if raw is None:
+            if tr.error:
+                logger.warning(f"Conformer task failed: {tr.error}")
+            continue
+
+        success, paths, smiles, row_id, variant_id, parent_id, variant_type, err = raw
         if not success and err:
             logger.warning(f"Row {row_id}: {err}")
             continue
-        smiles = args_list[idx][0]
+
         for i, (path, e_kcal) in enumerate(paths):
             row = {
                 "ID": row_id,

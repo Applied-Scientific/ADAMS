@@ -44,13 +44,26 @@ All pipeline outputs are automatically organized into a structured directory hie
 │       │   └── production_docking_results.csv
 │       └── metadata/       # Docking metadata
 │           └── dock_metadata.pkl
+│
+└── md_analysis/            # Molecular Dynamics analysis outputs
+    ├── protein/            # Protein topology files
+    │   ├── protein.gro
+    │   └── topol.top
+    ├── poses/              # Prepared ligand poses for MD
+    │   └── {ligand_name}_pocket_{grid_id}_top{rank}/
+    │       ├── {ligand_name}.gro
+    │       ├── {ligand_name}.top
+    │       └── ... (GROMACS simulation files: md.tpr, md.xtc, etc.)
+    └── reports/            # MD analysis reports
+        ├── md_analysis_summary_{range}.csv
+        └── brief_report_{range}.csv
 ```
 
 ## Key File Locations
 
 ### Preprocessing Outputs
 - **Cleaned Receptor (no hydrogens)**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_clean.pdb`
-- **Protonated Receptor (with hydrogens)**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_protonated.pdb` (use this for docking)
+- **Protonated Receptor (with hydrogens)**: `{outpath}/preprocessing/receptors/{protein_name}_{chain}_protonated.pdb` (use this for docking/MD)
 - **Processed Ligands**: `{outpath}/preprocessing/ligands/{prefix}_smallMW.csv` (or sampled version)
 - **Sampled Dataset**: `{outpath}/preprocessing/ligands/{prefix}_frac{sampling_frac}.csv` (if sampling enabled)
 - **PDBQT Files**: `{output_dir}/pdbqt_files/{clean_id}.pdbqt` (from SMILES conformers or 3D conversion)
@@ -60,6 +73,11 @@ All pipeline outputs are automatically organized into a structured directory hie
 - **Docking Centers (Search)**: `{out_folder}/docking/search/summaries/docking_centers.csv`
 - **Production Results**: `{out_folder}/docking/production/summaries/production_docking_results.csv`
 - **Individual Poses**: `{out_folder}/docking/production/poses/ligand_{idx}_pocket_{pocket_id}_docked.pdbqt`
+
+### MD Analysis Outputs
+- **Protein Topology**: `{md_workdir}/md_analysis/protein/protein.gro`, `topol.top`
+- **Prepared Poses**: `{md_workdir}/md_analysis/poses/{ligand_name}_pocket_{grid_id}_top{rank}/`
+- **Analysis Reports**: `{md_workdir}/md_analysis/reports/md_analysis_summary_{range}.csv`
 
 ## Important Notes
 
@@ -72,6 +90,8 @@ All pipeline outputs are automatically organized into a structured directory hie
 ## File Naming Patterns
 
 - **Cleaned Receptors (no hydrogens)**: `{protein_name}_{chain}_clean.pdb`
-- **Protonated Receptors (with hydrogens)**: `{protein_name}_{chain}_protonated.pdb` (use for docking)
+- **Protonated Receptors (with hydrogens)**: `{protein_name}_{chain}_protonated.pdb` (use for docking/MD)
 - **Docking Centers**: `docking_centers.csv` (in search/summaries/)
 - **Production Results**: `production_docking_results.csv` (in production/summaries/)
+- **Pose Directories**: `{ligand_name}_pocket_{grid_id}_top{rank}/`
+- **MD Trajectories**: `md.tpr`, `md.xtc`, `md.gro` (in pose directories)

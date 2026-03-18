@@ -17,14 +17,16 @@ A **Pipeline Execution** (or simply **Execution**) is a single run of the comput
 ---
 
 ### **Full Pipeline Run** (or **Full Run**, **Complete Pipeline**, **End-to-End Pipeline**)
-A **Full Pipeline Run** is a pipeline execution that includes BOTH stages in sequence:
+A **Full Pipeline Run** is a pipeline execution that includes ALL THREE stages in sequence:
 1. **Preprocessing Stage**: Cleans receptor PDBs and processes ligand CSVs
 2. **Docking Stage**: Discovers binding sites and performs molecular docking
+3. **MD Analysis Stage**: Runs molecular dynamics simulations and stability analysis
 
 **Key Properties:**
-- Executes both stages automatically without user confirmation between stages
+- **ALWAYS includes MD Analysis** - A "full run" is incomplete without MD
+- Executes all stages automatically without user confirmation between stages
 - Starts from Entry Point 1 (Preprocessing) with raw input files
-- Produces outputs from both stages in a single run directory
+- Produces outputs from all three stages in a single run directory
 
 **User Terminology:**
 When users request any of the following, they mean a **Full Pipeline Run**:
@@ -36,22 +38,24 @@ When users request any of the following, they mean a **Full Pipeline Run**:
 - "whole pipeline"
 - "entire workflow"
 
-**Example**: "I requested a full run, and the agent executed preprocessing and docking automatically."
+**Example**: "I requested a full run, and the agent executed preprocessing, docking, and MD analysis automatically."
 
 **Partial Runs** (for contrast):
-- **Docking Run**: Docking only (skips preprocessing) - user must explicitly request "docking only"
+- **Docking Run**: Preprocessing + Docking (no MD) - user must explicitly request "docking only" or "skip MD"
+- **MD Run**: MD Analysis only (skips preprocessing and docking) - user must explicitly request "MD only" or provide existing docking results
 - **Preprocessing Run**: Preprocessing only - user must explicitly request "preprocessing only"
 
 ---
 
 ### **Pipeline Stage** (or **Stage**)
-A **Pipeline Stage** is one of the two major computational phases that transform data:
+A **Pipeline Stage** is one of the three major computational phases that transform data:
 1. **Preprocessing Stage**: Consists of two independent operations that can be run in any order:
    - **Receptor Preparation**: Cleans receptor PDBs (run_clean_pdb; default keep_heterogens="essential"; optional keep_water)
    - **Ligand Preprocessing**: Processes ligand CSVs (run_ligand_preprocessing)
 2. **Docking Stage**: Discovers binding sites and performs molecular docking
+3. **MD Analysis Stage**: Runs molecular dynamics simulations and stability analysis
 
-Stages are sequential (preprocessing → docking). Executions can start at either stage via entry points. Within the preprocessing stage, receptor preparation and ligand data processing are independent and can be run in any order.
+Stages are sequential (preprocessing → docking → MD), but executions can start at any stage via entry points. Within the preprocessing stage, receptor preparation and ligand data processing are independent and can be run in any order.
 
 **Example**: "The docking stage completed successfully, producing 50 top poses."
 
@@ -68,6 +72,12 @@ A **Computational Module** is a Python module that performs the actual scientifi
 - `vina_dock.py`: Core docking engine (handles both search and production docking)
 - `find_pocket.py`: Pocket detection and clustering from docking results
 
+**MD Analysis Modules**:
+- `protein_topology.py`: Protein parameterization
+- `lig_prepare.py`: Ligand preparation for MD
+- `simulate/soluble_md.py` and `simulate/membrane_md.py`: GROMACS/OpenMM simulation execution
+- `stability_analysis.py`: Trajectory analysis
+
 **Example**: "The `vina_dock.py` computational module handles both CPU and GPU docking."
 
 ---
@@ -82,6 +92,7 @@ A **Domain Agent** is an LLM-powered agent that orchestrates a specific pipeline
 **Domain Agents**:
 - `preprocessing_agent`: Orchestrates preprocessing stage
 - `docking_agent`: Orchestrates docking stage
+- `md_agent`: Orchestrates MD analysis stage
 
 **Example**: "The docking agent selected GPU mode and configured the search grid based on the receptor size."
 
@@ -124,12 +135,13 @@ An **Agent Session** is a single interaction period with the controller agent. A
 An **Entry Point** is a specific stage where a pipeline execution can begin, allowing:
 - Resuming interrupted executions
 - Using pre-processed data from external sources
-- Running only specific stages
+- Running only specific stages (e.g., MD analysis on existing docking results)
 
 **Entry Points**:
 1. **Preprocessing**: Start from raw PDB and CSV
 2. **Search Docking**: Start from cleaned receptor and CSV
 3. **Production Docking**: Start from cleaned receptor, CSV, and known binding sites
+4. **MD Analysis**: Start from various points in the MD workflow
 
 **Example**: "We resumed the execution at Entry Point 3 (Production Docking) using the binding sites from a previous run."
 
@@ -169,6 +181,7 @@ A **Run Directory** is the timestamped output folder for a single pipeline execu
 A **Stage Output Directory** is a subdirectory within a run directory containing outputs from a specific stage:
 - `{run_dir}/preprocessing/`: Preprocessing outputs
 - `{run_dir}/docking/`: Docking outputs
+- `{run_dir}/md_analysis/`: MD analysis outputs
 
 **Example**: "The docking stage output directory contains search and production subdirectories."
 
@@ -200,7 +213,7 @@ An **Execution State** tracks the progress of a pipeline execution:
 - Available entry points for resume
 - Error context if interrupted
 
-**Example**: "The execution state shows preprocessing and docking completed."
+**Example**: "The execution state shows preprocessing and docking completed, ready for MD analysis."
 
 ---
 
@@ -209,8 +222,8 @@ An **Execution State** tracks the progress of a pipeline execution:
 | Term | Definition | Example |
 |------|-----------|---------|
 | **Pipeline Execution** | Single run through pipeline stages | "Execution in `run_20251203_143022`" |
-| **Full Pipeline Run** | Both stages: Preprocessing → Docking | "Full run completed all stages" |
-| **Pipeline Stage** | One of two major phases (preprocessing, docking) | "The docking stage completed" |
+| **Full Pipeline Run** | All three stages: Preprocessing → Docking → MD (always includes MD) | "Full run completed all stages" |
+| **Pipeline Stage** | One of three major phases (preprocessing, docking, MD) | "The docking stage completed" |
 | **Computational Module** | Core scientific computation code | "`vina_dock.py` module" |
 | **Domain Agent** | LLM agent orchestrating a stage | "The docking agent" |
 | **Workflow Agent** | Agent coordinating multiple stages | "Workflow agent handoff" |
@@ -231,7 +244,7 @@ An **Execution State** tracks the progress of a pipeline execution:
 
 1. **When discussing code structure**: Use "computational module" for direct scientific computation, and "agent" for LLM-powered orchestration that coordinates computational modules.
 
-2. **When discussing pipeline flow**: Use "pipeline stage" to refer to preprocessing/docking, and "pipeline execution" to refer to a complete run.
+2. **When discussing pipeline flow**: Use "pipeline stage" to refer to preprocessing/docking/MD, and "pipeline execution" to refer to a complete run.
 
 3. **When discussing agent hierarchy**: Use "domain agent" for stage-specific agents, "workflow agent" for coordination, and "controller agent" for top-level interaction.
 

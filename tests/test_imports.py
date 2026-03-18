@@ -54,7 +54,7 @@ def test_meeko_import():
     """
     Test that meeko can be imported.
     Note: meeko is listed as required in setup.py but imported with try/except
-    in pipeline code. This test ensures it's actually available.
+    in md_analysis/prepare/ligand_ops.py. This test ensures it's actually available.
     """
     try:
         from meeko import PDBQTMolecule, RDKitMolCreate

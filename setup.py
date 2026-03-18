@@ -18,6 +18,7 @@ setup(
             "pipeline/references/*.md",
             "pipeline/*/*_prompt.md",
             "helper_agents/*/*_prompt.md",
+            "pipeline/md_analysis/mdp/*.mdp",
             # Bundled Vina-GPU artifacts (executable + OpenCL kernels)
             "pipeline/docking/vina_gpu/*",
         ],

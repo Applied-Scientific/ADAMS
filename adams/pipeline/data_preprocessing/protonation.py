@@ -6,6 +6,9 @@ Protonation module using PDB2PQR with PROPKA for pKa-aware protonation state ass
 
 import shutil
 import subprocess
+import json
+import os
+import re
 from collections import defaultdict
 from math import inf
 from typing import Dict, List, Optional, Tuple
@@ -46,6 +49,27 @@ STANDARD_AA_RESNAMES = {
 
 TWO_LETTER_ELEMENTS = {"CL", "BR", "MG", "ZN", "FE", "CA", "MN", "CU", "NA", "SE"}
 SINGLE_LETTER_ELEMENTS = {"H", "B", "C", "N", "O", "F", "P", "S", "K", "I"}
+
+PDB2PQR_CRITICAL_WARNING_TYPES = {
+    "missing_atoms_or_failed_protonation",
+    "unable_to_debump",
+    "group_does_not_contain_ring",
+}
+
+WATER_LIKE_RESNAMES = {
+    "HOH",
+    "WAT",
+    "SOL",
+    "H2O",
+    "DOD",
+    "D2O",
+    "OH2",
+    "TIP3",
+    "TIP4",
+    "TIP5",
+    "SPC",
+    "SPCE",
+}
 
 
 def _normalize_element_symbol(raw: str) -> str:
@@ -197,6 +221,46 @@ def _pdb_atom_identity_key(line: str) -> Tuple[str, str, str, str, str, str, str
         line[12:16],  # atom name
         line[16:17],  # alt loc
         line[17:20],  # residue name
+        line[21:22],  # chain ID
+        line[22:26],  # residue sequence
+        line[26:27],  # insertion code
+        line[30:38],  # x
+        line[38:46],  # y
+        line[46:54],  # z
+    )
+
+
+def _is_water_like_resname(resname: str) -> bool:
+    """Return True for common crystallographic / topology water residue names."""
+    return (resname or "").strip().upper() in WATER_LIKE_RESNAMES
+
+
+def _pdb_atom_identity_key_for_merge(
+    line: str,
+) -> Tuple[str, str, str, str, str, str, str, str, str]:
+    """
+    Build a merge-time atom identity key.
+
+    PDB2PQR commonly rewrites preserved waters from HOH/O/H1/H2 to
+    WAT/OW/HW1/HW2. Canonicalize those water-like records so
+    _merge_preserved_hetatm() does not append the same structural waters twice.
+    """
+    resname = line[17:20]
+    if not _is_water_like_resname(resname):
+        return _pdb_atom_identity_key(line)
+
+    element_hint = line[76:78] if len(line) >= 78 else ""
+    element = _element_from_pdb_atom_name(
+        atom_name=line[12:16],
+        resname=resname,
+        record=line[0:6],
+        element_hint=element_hint,
+    ).strip().upper()
+    canonical_atom = element if element in {"O", "H"} else line[12:16].strip().upper()
+    return (
+        canonical_atom,
+        line[16:17],  # alt loc
+        "HOH",  # water residue names are interchangeable for preserved merge
         line[21:22],  # chain ID
         line[22:26],  # residue sequence
         line[26:27],  # insertion code
@@ -491,7 +555,7 @@ def _merge_preserved_hetatm(input_pdb: str, output_pdb: str) -> int:
         out_lines = f.readlines()
 
     existing_keys = {
-        _pdb_atom_identity_key(line)
+        _pdb_atom_identity_key_for_merge(line)
         for line in out_lines
         if line.startswith(("ATOM  ", "HETATM"))
     }
@@ -506,7 +570,7 @@ def _merge_preserved_hetatm(input_pdb: str, output_pdb: str) -> int:
 
     appended = []
     for line in preserved:
-        key = _pdb_atom_identity_key(line)
+        key = _pdb_atom_identity_key_for_merge(line)
         if key in existing_keys:
             continue
         max_serial += 1
@@ -530,6 +594,108 @@ def _merge_preserved_hetatm(input_pdb: str, output_pdb: str) -> int:
     return len(appended)
 
 
+def _classify_pdb2pqr_warning(line: str) -> str:
+    lowered = line.lower()
+    if "missing atoms or failed protonation" in lowered:
+        return "missing_atoms_or_failed_protonation"
+    if "unable to debump" in lowered:
+        return "unable_to_debump"
+    if "does not seem to contain a ring" in lowered:
+        return "group_does_not_contain_ring"
+    return "other_warning"
+
+
+def _extract_residue_id_from_warning(line: str) -> str:
+    """
+    Extract residue identifier from common PDB2PQR warning formats.
+    Returns empty string when no residue token is recognized.
+    """
+    patterns = [
+        # e.g. "for HIS  35 A"
+        r"\bfor\s+([A-Z0-9]{2,3}\s+-?\d+\s+[A-Za-z0-9-]+)\b",
+        # e.g. "Unable to debump HIS A 35"
+        r"\b([A-Z0-9]{2,3}\s+[A-Za-z0-9-]+\s+-?\d+)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if match:
+            return " ".join(match.group(1).split())
+    return ""
+
+
+def _collect_pdb2pqr_warning_rows(text: str) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "warning" not in line.lower():
+            continue
+        # PDB2PQR often prefixes warnings with "WARNING:" or "WARNING:WARNING:"
+        if "warning:" in line.lower():
+            message = re.sub(r"^(warning:)+", "", line, flags=re.IGNORECASE).strip()
+        else:
+            message = line
+        if not message:
+            continue
+        warning_type = _classify_pdb2pqr_warning(message)
+        residue_id = _extract_residue_id_from_warning(message)
+        rows.append(
+            {
+                "warning_type": warning_type,
+                "raw_message": message,
+                "residue_id": residue_id,
+            }
+        )
+    return rows
+
+
+def _write_pdb2pqr_warning_reports(
+    warning_rows: List[Dict[str, str]],
+    output_pdb: str,
+) -> Tuple[str, str]:
+    """
+    Write structured warning artifacts near protonation outputs.
+
+    Returns:
+        Tuple[str, str]: (warnings_csv_path, summary_json_path)
+    """
+    output_dir = os.path.dirname(os.path.abspath(output_pdb))
+    os.makedirs(output_dir, exist_ok=True)
+    warnings_csv_path = os.path.join(output_dir, "pdb2pqr_warnings.csv")
+    summary_json_path = os.path.join(output_dir, "pdb2pqr_warning_summary.json")
+
+    warning_type_counts: Dict[str, int] = defaultdict(int)
+    critical_rows = []
+    for row in warning_rows:
+        warning_type_counts[row["warning_type"]] += 1
+        if row["warning_type"] in PDB2PQR_CRITICAL_WARNING_TYPES:
+            critical_rows.append(row)
+
+    import csv
+
+    with open(warnings_csv_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=["warning_type", "raw_message", "residue_id"]
+        )
+        writer.writeheader()
+        for row in warning_rows:
+            writer.writerow(row)
+
+    summary_payload = {
+        "total_warnings": len(warning_rows),
+        "warning_type_counts": dict(sorted(warning_type_counts.items())),
+        "critical_warning_types": sorted(PDB2PQR_CRITICAL_WARNING_TYPES),
+        "critical_warning_count": len(critical_rows),
+        "critical_warnings": critical_rows,
+        "warnings_csv": warnings_csv_path,
+    }
+    with open(summary_json_path, "w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, indent=2)
+
+    return warnings_csv_path, summary_json_path
+
+
 def run_pdb2pqr(
     input_pdb: str,
     output_pqr: str,
@@ -537,7 +703,8 @@ def run_pdb2pqr(
     pH: float = 7.4,
     ff: str = "AMBER",
     ffout: str = "AMBER",
-) -> Tuple[str, str]:
+    warning_strict: bool = False,
+) -> Tuple[str, str, str, str]:
     """
     Run PDB2PQR with PROPKA to assign protonation states.
 
@@ -550,30 +717,47 @@ def run_pdb2pqr(
         ffout: Output force field (default: "AMBER")
 
     Returns:
-        Tuple[str, str]: (output_pdb_path, output_pqr_path)
+        Tuple[str, str, str, str]:
+            (output_pdb_path, output_pqr_path, warnings_csv_path, summary_json_path)
     """
     logger = get_logger()
 
-    if shutil.which("pdb2pqr") is None:
-        raise RuntimeError("Missing pdb2pqr. Install: conda install -c conda-forge pdb2pqr")
-    if shutil.which("propka3") is None:
-        raise RuntimeError("Missing propka3. Install: conda install -c conda-forge propka")
+    pdb2pqr_bin = shutil.which("pdb2pqr") or shutil.which("pdb2pqr30")
+    if pdb2pqr_bin is None:
+        raise RuntimeError(
+            "Missing pdb2pqr executable. Expected one of: pdb2pqr, pdb2pqr30. "
+            "Install: conda install -c conda-forge pdb2pqr"
+        )
+
+    propka_bin = shutil.which("propka3") or shutil.which("propka")
+    if propka_bin is None:
+        raise RuntimeError(
+            "Missing PROPKA executable. Expected one of: propka3, propka. "
+            "Install: conda install -c conda-forge propka"
+        )
 
     cmd_common = [
-        "pdb2pqr",
+        pdb2pqr_bin,
         "--ff", ff,
         "--ffout", ffout,
         "--with-ph", str(pH),
         "--titration-state-method=propka",
     ]
 
+    logger.info(
+        "Using protonation executables: pdb2pqr=%s, propka=%s",
+        os.path.basename(pdb2pqr_bin),
+        os.path.basename(propka_bin),
+    )
+
     logger.info(f"Running PDB2PQR with PROPKA (pH={pH}) on {input_pdb}")
     # Preserve chain IDs in PDB2PQR output when supported. Fall back if flag
     # is unavailable in older/newer PDB2PQR builds.
     cmd_with_keep_chain = cmd_common + ["--keep-chain", input_pdb, output_pqr]
     cmd_without_keep_chain = cmd_common + [input_pdb, output_pqr]
+    run_result = None
     try:
-        run_cmd(cmd_with_keep_chain, check=True)
+        run_result = run_cmd(cmd_with_keep_chain, check=True)
     except subprocess.CalledProcessError as e:
         combined = f"{(e.stderr or '')}\n{(e.stdout or '')}".lower()
         if "keep-chain" in combined and (
@@ -582,9 +766,28 @@ def run_pdb2pqr(
             logger.warning(
                 "pdb2pqr does not support --keep-chain; retrying without it."
             )
-            run_cmd(cmd_without_keep_chain, check=True)
+            run_result = run_cmd(cmd_without_keep_chain, check=True)
         else:
             raise
+
+    combined_output = ""
+    if run_result is not None:
+        combined_output = f"{run_result.stdout or ''}\n{run_result.stderr or ''}"
+
+    warning_rows = _collect_pdb2pqr_warning_rows(combined_output)
+    warnings_csv_path, summary_json_path = _write_pdb2pqr_warning_reports(
+        warning_rows, output_pdb
+    )
+    logger.info(
+        "PDB2PQR warning report: total=%d, csv=%s, summary=%s",
+        len(warning_rows),
+        warnings_csv_path,
+        summary_json_path,
+    )
+    critical_rows = [
+        row for row in warning_rows
+        if row["warning_type"] in PDB2PQR_CRITICAL_WARNING_TYPES
+    ]
 
     restored_pqr = 0
     try:
@@ -626,5 +829,13 @@ def run_pdb2pqr(
     except Exception as e:
         logger.warning(f"Failed to normalize TER records in protonated PDB: {e}")
     logger.info(f"Protonation complete: {output_pdb}")
+
+    if warning_strict and critical_rows:
+        critical_types = sorted({row["warning_type"] for row in critical_rows})
+        raise RuntimeError(
+            "PDB2PQR strict warning mode triggered. "
+            f"Detected critical warning types: {critical_types}. "
+            f"See {summary_json_path} for details."
+        )
     
-    return output_pdb, output_pqr
+    return output_pdb, output_pqr, warnings_csv_path, summary_json_path

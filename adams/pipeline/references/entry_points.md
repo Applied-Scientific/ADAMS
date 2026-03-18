@@ -28,7 +28,7 @@ The pipeline supports starting from ANY step, not just the beginning. This enabl
 **CRITICAL**: Receptor preparation requires TWO steps:
 1. `run_clean_pdb()` - outputs `_clean.pdb` (no hydrogens)
 2. `run_protonate_receptor()` - outputs `_protonated.pdb` (with hydrogens)
-Use the `_protonated.pdb` file for docking.
+Use the `_protonated.pdb` file for docking and MD.
 
 **Next Steps**: Proceeds to Search Docking (Entry Point 2)
 
@@ -48,7 +48,7 @@ Use the `_protonated.pdb` file for docking.
 - Docking centers: {out_folder}/docking/search/summaries/docking_centers.csv
 - Production results: {out_folder}/docking/production/summaries/production_docking_results.csv
 
-**Next Steps**: End of pipeline (docking complete).
+**Next Steps**: Proceeds to MD Analysis (Entry Point 4)
 
 **IMPORTANT**: Docking requires a CSV with a PDBQT_File column. Conformers are generated only in preprocessing. If you have only SMILES/ID, run the preprocessing agent first (run_standardize_ligand_data → run_smiles_to_pdbqt) and use the returned mapping CSV as input_data.
 
@@ -68,9 +68,75 @@ Use the `_protonated.pdb` file for docking.
 **Outputs**:
 - Production results: {out_folder}/docking/production/summaries/production_docking_results.csv
 
-**Next Steps**: End of pipeline (docking complete).
+**Next Steps**: Proceeds to MD Analysis (Entry Point 4)
 
 **IMPORTANT**: Docking requires a CSV with a PDBQT_File column. Conformers are generated only in preprocessing. If you have only SMILES/ID, run the preprocessing agent first (run_standardize_ligand_data → run_smiles_to_pdbqt) and use the returned mapping CSV as input_data.
+
+---
+
+### Entry Point 4: MD - Protein Topology
+**Purpose**: Start MD pipeline from protein topology generation
+**Required Files**:
+- protonated_receptor.pdb (must be protonated, from run_protonate_receptor)
+- docking_results folder (with production_docking_results.csv)
+- ligand_input (SMILES string, CSV, SDF, or MOL2 file)
+
+**What It Does**:
+- Generates protein topology (protein.gro, topol.top)
+- Prepares ligands from docking results
+- Runs MD simulations
+- Performs stability analysis
+
+**Outputs**:
+- Protein topology: {md_workdir}/md_analysis/protein/protein.gro, topol.top
+- Prepared poses: {md_workdir}/md_analysis/poses/{ligand_name}_pocket_{grid_id}_top{rank}/
+- Analysis reports: {md_workdir}/md_analysis/reports/
+
+---
+
+### Entry Point 5: MD - Ligand Preparation
+**Purpose**: Start MD pipeline from ligand preparation (skip protein topology)
+**Required Files**:
+- protein.gro
+- topol.top
+- docking_results folder
+- ligand_input (SMILES string, CSV, SDF, or MOL2 file)
+
+**What It Does**:
+- Skips protein topology generation
+- Prepares ligands from docking results
+- Runs MD simulations
+- Performs stability analysis
+
+**Outputs**: Same as Entry Point 4 (poses and reports)
+
+---
+
+### Entry Point 6: MD - Gro (MD Simulations)
+**Purpose**: Start from MD simulations (skip topology and ligand prep)
+**Required Files**:
+- pose_directories with min.gro, system.top, index.ndx
+
+**What It Does**:
+- Skips topology and ligand preparation
+- Runs MD simulations on prepared poses
+- Performs stability analysis
+
+**Outputs**: MD trajectories and analysis reports
+
+---
+
+### Entry Point 7: MD - Stability Analysis Only
+**Purpose**: Run only stability analysis on completed MD trajectories
+**Required Files**:
+- pose_directories with md.tpr, md.xtc, md.gro, index files
+
+**What It Does**:
+- Skips all previous steps
+- Analyzes completed MD trajectories
+- Generates stability reports
+
+**Outputs**: Analysis reports only
 
 ---
 
@@ -88,6 +154,23 @@ Use the `_protonated.pdb` file for docking.
 - User says: "binding sites known", "dock at these coordinates", "use centers"
 - File clues: Has docking_centers or docking_centers_file, CSV with PDBQT_File column
 
+**MD - Protein Topology (Entry Point 4)**:
+- User says: "docking is complete", "have docking results", "run MD from docking"
+- File clues: Has docking folder, no protein.gro
+
+**MD - LigPrepare (Entry Point 5)**:
+- User says: "have protein topology", "protein.gro ready", "skip protein topology"
+- File clues: Has protein.gro AND topol.top
+- When starting here: pass water_model (e.g. tip3p, spc) to match the topology so solvation is consistent.
+
+**MD - Gro (Entry Point 6)**:
+- User says: "ligands are prepared", "have pose directories", "run MD simulations"
+- File clues: Has poses/ directory with min.gro, system.top, index.ndx
+
+**MD - Stability Analysis (Entry Point 7)**:
+- User says: "MD is complete", "analyze trajectories", "run stability analysis"
+- File clues: Has md.tpr, md.xtc, md.gro files in pose directories
+
 ---
 
 ## Quick Reference Table
@@ -97,3 +180,7 @@ Use the `_protonated.pdb` file for docking.
 | 1. Preprocessing | raw_receptor.pdb, ligand_input (SMILES/SDF/MOL2/PDB) | None |
 | 2. Search Docking | cleaned_receptor, CSV with ID+PDBQT_File | Preprocessing |
 | 3. Production Docking | cleaned_receptor, CSV with ID+PDBQT_File, docking_centers | Preprocessing, Search |
+| 4. MD-ProteinTopo | cleaned_receptor, docking_results, smiles.csv | Preprocessing, Docking |
+| 5. MD-LigPrepare | protein.gro, topol.top, docking_results, smiles.csv | Preprocessing, Docking, ProteinTopo |
+| 6. MD-Gro | pose_dirs (with min.gro, system.top, index.ndx) | All previous MD steps |
+| 7. MD-Analysis | pose_dirs (with md.tpr, md.xtc, md.gro) | All MD steps except analysis |

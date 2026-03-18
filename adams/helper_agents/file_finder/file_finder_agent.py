@@ -35,7 +35,7 @@ def scan_directory(path: str = "") -> dict:
         path (str): Path to scan, relative to the current working directory.
             Empty string ("") scans the current working directory.
             Example: "" for root, "outputs" for outputs subdirectory,
-            "outputs/run_20251203/docking" for nested path.
+            "outputs/run_20251203/md_analysis" for nested path.
 
     Returns:
         dict: Dictionary containing:
@@ -143,19 +143,20 @@ def check_directory_contents(dir_path: str, required_files: str) -> dict:
     Check if a directory contains specific required files.
 
     This function verifies that a directory contains all specified files. It's particularly
-    useful for checking that directories contain required output files (e.g., docking summaries).
+    useful for checking pose directories that should contain specific MD simulation files
+    (e.g., min.gro, system.top, index.ndx) or completed MD directories (md.tpr, md.xtc, md.gro).
 
     Use this when:
-    - You need to verify a directory has all required files
-    - You want to check if a directory has expected output files
+    - You need to verify a pose directory has all required files for MD simulation
+    - You want to check if an MD directory has completed simulation files
     - You need to validate directory completeness before proceeding
 
     Args:
         dir_path (str): Path to directory to check. Can be relative to the current
             working directory or an absolute path. Example:
-            "agent_data/run_20251203/docking/production/summaries"
+            "agent_data/run_20251203/md_analysis/poses/ligand_pocket_0_top1"
         required_files (str): Comma-separated list of required file names.
-            Example: "production_docking_results.csv,docking_centers.csv"
+            Example: "min.gro,system.top,index.ndx" or "md.tpr,md.xtc,md.gro"
             Files are checked by exact name match (case-sensitive).
 
     Returns:
@@ -168,8 +169,11 @@ def check_directory_contents(dir_path: str, required_files: str) -> dict:
             - 'all_present' (bool): True if all required files exist, False otherwise
 
     Example:
-        >>> result = check_directory_contents("agent_data/run_1/docking/production/summaries", "production_docking_results.csv")
-        >>> # Returns: {'all_present': True, 'found_files': ['production_docking_results.csv'], ...}
+        >>> result = check_directory_contents("agent_data/run_1/poses/ligand_1", "min.gro,system.top,index.ndx")
+        >>> # Returns: {'all_present': True, 'found_files': ['min.gro', 'system.top', 'index.ndx'], ...}
+
+        >>> result = check_directory_contents("agent_data/run_1/md_analysis/poses/ligand1", "md.tpr,md.xtc,md.gro")
+        >>> # Checks for completed MD simulation files
     """
     print(f"[Agent] Verifying directory contents: {dir_path}")
     return check_directory_contents_impl(dir_path, required_files)
@@ -217,17 +221,29 @@ def read_file_preview(file_path: str, lines: int = 20) -> dict:
 prompt_path = Path(__file__).parent / "file_finder_prompt.md"
 system_prompt = prompt_path.read_text()
 
-file_finder_agent = Agent(
-    model="gpt-5-mini",
-    name="File Finder Agent",
-    instructions=system_prompt,
-    tools=[
-        read_reference_file,
-        scan_directory,
-        read_csv_headers,
-        check_file_exists,
-        check_directory_contents,
-        read_file_preview,
-    ],
-    model_settings=ModelSettings(tool_choice="auto"),
-)
+_file_finder_agent = None
+_file_finder_model = None
+
+
+def get_file_finder_agent() -> Agent:
+    global _file_finder_agent, _file_finder_model
+    from ...model_config import get_current_model_name, get_resolved_model
+
+    current_model = get_current_model_name()
+    if _file_finder_agent is None or _file_finder_model != current_model:
+        _file_finder_agent = Agent(
+            model=get_resolved_model(),
+            name="File Finder Agent",
+            instructions=system_prompt,
+            tools=[
+                read_reference_file,
+                scan_directory,
+                read_csv_headers,
+                check_file_exists,
+                check_directory_contents,
+                read_file_preview,
+            ],
+            model_settings=ModelSettings(tool_choice="auto"),
+        )
+        _file_finder_model = current_model
+    return _file_finder_agent

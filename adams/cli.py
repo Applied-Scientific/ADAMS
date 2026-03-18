@@ -5,7 +5,6 @@
 
 import argparse
 import logging
-import os
 import shutil
 import textwrap
 from pathlib import Path
@@ -16,6 +15,7 @@ from prompt_toolkit import prompt
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 
+from .cli_docking import add_dock_subparser, run_dock_command
 from .executive_agent import create_agent, setup_tracing
 from .format_trace import format_trace_file
 from .memory import add_session_tags
@@ -29,6 +29,7 @@ from .memory.custom_memory import (
 )
 from .memory.persistent_memory import clear_user_preferences
 from .path_config import set_agent_data_path
+from .utils.console_transcript import start_console_transcript
 from .utils.secrets_manager import get_api_key
 from .utils.session_utils import create_sdk_session
 
@@ -163,29 +164,20 @@ def format_session_trace():
         print(f"\nWarning: Could not format trace file: {e}")
 
 
-def run_session_metadata_update(agent, session, session_id, trace_processor, max_turns=10, add_interrupted_tag=False):
+def run_session_metadata_update(agent, session, trace_processor, max_turns=10):
     """
-    Run one agent turn so the agent can update session description and tags
-    before exit. Used on exit/quit and Ctrl+C.
+    Run one agent turn to say goodbye on exit. Used on exit/quit and Ctrl+C.
+    Session metadata is owned by the controller; diagnostic agents may suggest it
+    during analysis, but they do not need to write it directly.
     
     Args:
         agent: The agent instance
         session: The session object
-        session_id: The session ID
         trace_processor: The trace processor for logging
         max_turns: Maximum turns for the agent (default 10, use 3 for interrupted sessions)
-        add_interrupted_tag: Whether to also add "interrupted" tag
     """
-    tags_instruction = (
-        "with appropriate tags including 'interrupted'" if add_interrupted_tag 
-        else "with appropriate tags"
-    )
     prompt = (
-        f"The user is ending the session. Update session metadata: call "
-        f"set_session_description_tool(session_id='{session_id}', description=...) and "
-        f"set_session_tags_tool(session_id='{session_id}', tags=[...]) for this session with a "
-        f"one-sentence description and {tags_instruction} based on this conversation, then respond "
-        f"with a brief goodbye."
+        "The user is ending the session. Respond with a brief goodbye."
     )
     trace_processor.write_user_input(prompt)
     try:
@@ -231,6 +223,14 @@ def handle_instructions_command(args):
             print("No custom instructions set.")
         return
 
+    if action == "clear":
+        try:
+            set_instructions("")
+            print("Custom instructions cleared")
+        except Exception as e:
+            print(f"Error: {e}")
+        return
+
     if action == "set":
         text, err = _get_instruction_text(
             args, "Enter instructions (max 100 words). Press Ctrl+D when done:"
@@ -250,10 +250,10 @@ def handle_instructions_command(args):
     try:
         if action == "set":
             set_instructions(text)
-            print("✓ Instructions updated")
+            print("Instructions updated")
         else:
             append_instructions(text)
-            print("✓ Instructions appended")
+            print("Instructions appended")
     except ValueError as e:
         print(f"Error: {e}")
 
@@ -265,13 +265,13 @@ def handle_preferences_command(args):
     try:
         _ensure_agent_data_path_for_memory()
         clear_user_preferences()
-        print("✓ User preferences cleared")
+        print("User preferences cleared")
     except Exception as e:
         print(f"Error: {e}")
 
 
-def _parse_args():
-    """Parse CLI arguments."""
+def _parse_args(argv=None):
+    """Parse CLI arguments. If argv is None, uses sys.argv[1:]."""
     parser = argparse.ArgumentParser(
         prog="adams",
         description="ADAMS - Agent-Driven Autonomous Molecular Simulations",
@@ -287,7 +287,10 @@ def _parse_args():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
     # Instructions command
-    instructions_parser = subparsers.add_parser("instructions", help="Manage custom instructions")
+    instructions_parser = subparsers.add_parser(
+        "instructions",
+        help="Manage custom instructions (get, set, append, clear). Use 'adams instructions -h' for details.",
+    )
     instructions_subparsers = instructions_parser.add_subparsers(
         dest="instructions_action", help="Action", required=True
     )
@@ -296,25 +299,39 @@ def _parse_args():
     instructions_subparsers.add_parser("get", help="Read current instructions")
     
     # Set instructions
-    set_parser = instructions_subparsers.add_parser("set", help="Set instructions (replaces existing)")
+    set_parser = instructions_subparsers.add_parser(
+        "set",
+        help="Set instructions (replaces existing). Use text, --file PATH, or stdin.",
+    )
     set_parser.add_argument("text", nargs="?", help="Instructions text")
-    set_parser.add_argument("--file", "-f", help="Read from file")
+    set_parser.add_argument("--file", "-f", help="Read instructions from file")
     
     # Append instructions
-    append_parser = instructions_subparsers.add_parser("append", help="Append to existing instructions")
+    append_parser = instructions_subparsers.add_parser(
+        "append",
+        help="Append to existing instructions. Use text, --file PATH, or stdin.",
+    )
     append_parser.add_argument("text", nargs="?", help="Instructions text to append")
-    append_parser.add_argument("--file", "-f", help="Read from file")
+    append_parser.add_argument("--file", "-f", help="Read instructions from file")
+    
+    # Clear instructions
+    instructions_subparsers.add_parser("clear", help="Clear custom instructions")
     
     # Preferences command
-    preferences_parser = subparsers.add_parser("preferences", help="Manage user preferences")
+    preferences_parser = subparsers.add_parser(
+        "preferences",
+        help="Manage user preferences (clear). Use 'adams preferences -h' for details.",
+    )
     preferences_subparsers = preferences_parser.add_subparsers(
         dest="preferences_action", help="Action", required=True
     )
     
     # Clear preferences
     preferences_subparsers.add_parser("clear", help="Clear all user preferences")
+
+    add_dock_subparser(subparsers)
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv) if argv is not None else parser.parse_args()
     
     # Default to session if no command
     if args.command is None:
@@ -334,6 +351,10 @@ def main():
     if args.command == "preferences":
         handle_preferences_command(args)
         return
+
+    if args.command == "dock":
+        run_dock_command(args)
+        return
     
     # Default: interactive session
     _run_interactive_session(args)
@@ -341,6 +362,12 @@ def main():
 
 def _run_interactive_session(args):
     """Run the interactive agent session."""
+    working_dir = Path.cwd()
+    agent_data_path = working_dir / "agent_data"
+    set_agent_data_path(path=agent_data_path)
+    transcript_path = start_console_transcript()
+    print(f"[Transcript] {transcript_path}")
+
     print(
         r"""
     ╔════════════════════════════════════════════════════════════════════╗
@@ -353,7 +380,7 @@ def _run_interactive_session(args):
     ║                                                                    ║
     ║    Agent-Driven Autonomous Molecular Simulations                   ║
     ║                                                                    ║
-    ║    An agentic workflow that automates molecular docking     ║
+    ║    An agentic workflow that automates molecular docking and MD     ║
     ║    simulation based on user-provided prompts.                      ║
     ║    Protein preprocessing, binding pocket discovery, docking        ║
     ║    and stability analysis.                                         ║
@@ -376,12 +403,8 @@ def _run_interactive_session(args):
     if api_key is None:
         return
 
-    # Use current working directory
-    working_dir = Path.cwd()
-    agent_data_path = working_dir / "agent_data"
     print(f"Using working directory: {working_dir}")
     print(f"Data will be stored in: {agent_data_path}\n")
-    set_agent_data_path(path=agent_data_path)
 
     session_id = args.continue_session if args.continue_session else None
 
@@ -406,21 +429,21 @@ def _run_interactive_session(args):
     def cleanup_on_shutdown():
         """Cleanup callback for graceful shutdown on Ctrl+C."""
         try:
-            # Still generate session metadata even on interrupt, but with a quick timeout
             print("\n[Saving session metadata...]", flush=True)
             run_session_metadata_update(
-                agent, session, actual_session_id, trace_processor, 
-                max_turns=3,  # Shorter for interrupted sessions
-                add_interrupted_tag=True
+                agent, session, trace_processor,
+                max_turns=3,
             )
         except Exception:
-            # Fallback: at least tag as interrupted
             try:
                 add_session_tags(actual_session_id, ["interrupted"])
             except Exception:
                 pass
         try:
-            # Format trace file
+            trace_processor.shutdown()
+        except Exception:
+            pass
+        try:
             format_session_trace()
         except Exception:
             pass
@@ -491,9 +514,15 @@ def _run_interactive_session(args):
         
         if exit_normally:
             try:
-                run_session_metadata_update(agent, session, actual_session_id, trace_processor)
+                run_session_metadata_update(agent, session, trace_processor)
             except (OSError, KeyboardInterrupt):
                 pass
+
+        # Write session_end marker (idempotent — safe if already called by shutdown handler)
+        try:
+            trace_processor.shutdown()
+        except Exception:
+            pass
         
         # Format trace file if not already done by shutdown manager
         try:

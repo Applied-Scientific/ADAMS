@@ -1,6 +1,6 @@
 # Pipeline Terminology - Quick Reference
 
-> **Purpose**: This document defines standard terminology for clear communication between users, developers, and agents about the molecular docking pipeline.
+> **Purpose**: This document defines standard terminology for clear communication between users, developers, and agents about the molecular docking and MD simulation pipeline.
 
 ---
 
@@ -19,12 +19,13 @@
 ## Core Pipeline Concepts
 
 ### **Pipeline Stage** (or **Stage**)
-One of two major sequential phases that transform data:
+One of three major sequential phases that transform data:
 
 1. **Preprocessing** - Clean PDB structures, filter and validate ligand CSVs
 2. **Docking** - Discover binding sites, dock ligands at those sites
+3. **MD Analysis** - Run molecular dynamics simulations and stability analysis
 
-**Flow**: Preprocessing → Docking (can start at either stage via entry points)
+**Flow**: Preprocessing → Docking → MD (can start at any stage via entry points)
 
 ---
 
@@ -42,9 +43,9 @@ One complete run of the workflow agent through pipeline stages.
 ---
 
 ### **Full Pipeline Run** (or **Full Run**, **Complete Pipeline**)
-A pipeline execution that includes **both stages** in sequence: Preprocessing → Docking.
+A pipeline execution that includes **ALL THREE stages** in sequence: Preprocessing → Docking → MD Analysis.
 
-When users request:
+**CRITICAL**: A "full run" **ALWAYS includes MD Analysis**. When users request:
 - "full run"
 - "full pipeline"
 - "complete pipeline"
@@ -53,9 +54,9 @@ When users request:
 - "whole pipeline"
 - "entire workflow"
 
-They mean both stages.
+They mean all three stages including MD. **Do NOT ask if MD is included** - it is always included in a full run.
 
-**Example**: "I requested a full run, and it automatically executed preprocessing and docking."
+**Example**: "I requested a full run, and it automatically executed preprocessing, docking, and MD analysis."
 
 ---
 
@@ -65,10 +66,14 @@ A specific stage where a pipeline execution can begin, enabling:
 - Using pre-processed data from external sources
 - Running only specific stages
 
-**3 Entry Points:**
+**7 Entry Points:**
 1. **Preprocessing** - Start from raw PDB and CSV
 2. **Search Docking** - Start from cleaned receptor (discover binding sites)
 3. **Production Docking** - Start with known binding sites
+4. **MD - Protein Topology** - Start MD from protein parameterization
+5. **MD - Ligand Prep** - Start MD with existing protein topology
+6. **MD - Simulations** - Start MD with prepared poses
+7. **MD - Analysis Only** - Analyze existing MD trajectories
 
 **Example**: "Resume at Entry Point 3 (Production Docking) with known binding sites."
 
@@ -83,6 +88,8 @@ One complete run of `cli.py` - the top-level interaction with the controller age
 - Trace file captures all agent interactions across ALL executions in the session
 
 **Example**: "This session ran 3 pipeline executions with different parameters."
+
+**Session memory:** A session has **plan_paths** (a list) linked by the **workflow wrapper** when the executive calls workflow_agent with session_id. Meta_analysis uses get_session_plan_summary and read_plan_document for resume and diagnosis.
 
 ---
 
@@ -122,7 +129,7 @@ Mechanism where outputs from one stage become inputs to the next. The workflow a
 
 **Critical Handoffs:**
 - **Preprocessing → Docking**: Cleaned receptor PDB, processed ligand CSV
-- **Docking**: Production docking results CSV (end of pipeline)
+- **Docking → MD**: Production docking results CSV, ligand CSV, cleaned receptor
 
 **Example**: "Workflow agent passed `5LS6_A_protonated.pdb` from preprocessing (run_protonate_receptor) to docking agent."
 
@@ -143,7 +150,11 @@ Note: These operations are independent and can be run in any order.
 - `vina_dock_gpu.py` - Molecular docking engine (GPU mode)
 - `find_pocket.py` - Binding site detection and clustering
 
-*MD / stability analysis modules: coming soon in a future release.*
+**MD Analysis:**
+- `protein_topology.py` - Protein parameterization for GROMACS
+- `lig_prepare.py` - Ligand preparation for MD (ligprep)
+- `run_gro.py` - GROMACS simulation execution
+- `stability_analysis.py` - MD trajectory analysis
 
 ---
 
@@ -153,6 +164,9 @@ Python modules providing shared helper functions (no classes, no orchestration).
 **Docking Utilities:**
 - `utils.py` - PDBQT parsing, grid generation, coordinate transformations
 
+**MD Analysis Utilities:**
+- `_utils.py` - GROMACS utilities (file cleanup, binary detection, topology editing)
+- `agent_utils.py` - Tool functions for MD agent (file path discovery, structure)
 
 **Global Utilities:**
 - `logger_utils.py` - Centralized logging
@@ -165,39 +179,41 @@ Python modules providing shared helper functions (no classes, no orchestration).
 
 ### **Main Agents** (orchestrate the pipeline)
 
-#### **Controller Agent** (`executive_agent.py`)
-- **Role**: Top-level user interface
-- **Scope**: Entire agent session, multiple executions
-- **Capabilities**: Interpret user intent, plan executions, compare results
-- **Example**: "Run 3 parameter sweeps and compare docking results"
+#### **Biophysics Controller** (`executive_agent.py`)
+- **Role**: Top-level user interface. Interprets user intent, decides multi-run strategy, obtains plan approval, delegates single-run execution to the workflow agent.
+- **Scope**: Entire agent session, multiple runs.
+- **Does not**: Specify pipeline mechanics or stage-level details.
 
 #### **Workflow Agent** (`workflow_agent.py`)
-- **Role**: Coordinate stages within a single execution
-- **Scope**: One pipeline execution (preprocessing → docking)
-- **Capabilities**: Manage stage sequence, file path handoffs, logging setup
-- **Example**: "Hand off cleaned PDB from preprocessing to docking stage"
+- **Role**: Coordinate a single pipeline run (preprocessing → docking → MD). Manages stage sequence, handoffs, paths, logging.
+- **Scope**: One pipeline execution.
+- **Does not**: Assume defaults unless the user, approved plan, or executive context (including memory-derived preferences) specifies them; executive provides context.
 
 ---
 
-### **Stage Agents** (also called **Domain Agents**)
-LLM-powered agents that orchestrate specific pipeline stages.
+### **Stage Agents** (Domain Agents)
+Execute one pipeline stage each; receive instructions from the workflow agent.
 
-- `preprocessing_agent.py` - Orchestrates preprocessing stage
-- `docking_agent.py` - Orchestrates docking stage
-
-**Key Point**: Stage agents call worker modules with appropriate parameters.
+- `preprocessing_agent.py` - **Preprocessing Agent**: receptor cleaning, protonation, ligand standardization/conformers only. Does not coordinate docking or MD.
+- `docking_agent.py` - **Docking Agent**: search and/or production docking only. Does not coordinate preprocessing or MD.
+- `md_agent.py` - **MD Agent**: MD prepare, simulate, analyze only. Does not coordinate preprocessing or docking.
 
 ---
 
 ### **Helper Agents**
-Specialized support agents that don't execute pipeline stages.
+Narrow-scope support; do not execute pipeline stages.
 
-- `file_finder_agent.py` - Scan files, recommend entry points
-- `meta_analysis_agent.py` - Analyze past execution traces and log files
-- `file_parser_agent.py` - Extract data from various file formats
-- `oversight_agent.py` - Monitor and validate execution
+- `file_finder_agent.py` - Discover and classify files (e.g. input files in CWD, intermediates in agent_data).
+- `meta_analysis_agent.py` - **Current-run error solving**; has session memory (read + write) and is **responsible for session tagging**. Analyzes traces and logs; tags sessions (e.g. "error", "docking") after analysis.
+- `file_parser_agent.py` - Extract structured data from result files.
+- `oversight_agent.py` - **Oversight Agent**: Validate execution plans only (scientific soundness, intent alignment, parameters). Does not execute or suggest pipeline mechanics.
 
-**Key Point**: Helper agents support main agents but don't run pipeline stages.
+### **Plan tags vs Session tags**
+| Entity | Who sets tags | Who uses them | Purpose |
+|--------|----------------|----------------|---------|
+| **Plans** | Workflow agent (`set_plan_tags`) | Controller (`get_all_plan_tags`, `list_plans_by_tag`) | Discover and reuse plans by tag |
+| **Sessions** | Meta_analysis agent only | Meta_analysis (read + tag) | Organize runs; record outcome/type for current-run context |
+The controller has **no session tools**; it discovers work via **plan tags** and reuses or creates plans via the workflow agent.
 
 ---
 
@@ -211,6 +227,7 @@ Timestamped output folder for a single pipeline execution.
 **Contains:**
 - `preprocessing/` - Stage output directory
 - `docking/` - Stage output directory
+- `md_analysis/` - Stage output directory
 
 **Example**: "All outputs are in `run_20251217_143022/`."
 
@@ -222,7 +239,8 @@ Subdirectory within run directory for a specific stage's outputs.
 **Structure:**
 - `{run_dir}/preprocessing/` - Cleaned receptors, processed CSVs
 - `{run_dir}/docking/search/` - Search docking results
-- `{run_dir}/docking/production/` - Production docking results
+- `{run_dir}/docking/production/` - Production docking results  
+- `{run_dir}/md_analysis/` - MD simulation outputs
 
 **Example**: "Docking results are in `run_20251217_143022/docking/production/`."
 
@@ -277,7 +295,7 @@ Subdirectory within run directory for a specific stage's outputs.
 | "The vina_dock agent performed docking" | "The docking agent called the vina_dock worker module" |
 | "The workflow module processed the stage" | "The workflow agent orchestrated the preprocessing stage agent" |
 | "The helper executed the pipeline" | "The helper agent found entry points; the controller agent executed the pipeline" |
-| "The ligprep module orchestrated ligand preparation" | "The docking agent called the find_pocket module" |
+| "The ligprep module orchestrated ligand preparation" | "The MD agent called the lig_prepare worker module" |
 | "The utils agent converts files" | "The docking worker uses utility functions from utils.py" |
 | "Check the trace file for execution timing" | "Check the log file for timing; trace shows agent interactions" |
 | "This run created a new trace file" | "This execution created a new log file within the session's trace" |
@@ -295,8 +313,10 @@ Subdirectory within run directory for a specific stage's outputs.
 | **PDBQT** | PDB with Charges and Atom Types | Docking-ready protein/ligand format |
 | **CSV** | Comma-Separated Values | Tabular data format for ligand lists |
 | **SMILES** | Simplified Molecular Input Line Entry System | Text representation of chemical structures |
+| **MD** | Molecular Dynamics | Simulation method for studying molecular motion |
+| **GROMACS** | GROningen MAchine for Chemical Simulations | MD simulation software package |
 | **MolWt** | Molecular Weight | Mass of a molecule in Daltons (Da) |
-| **GPU** | Graphics Processing Unit | Hardware accelerator for docking |
+| **GPU** | Graphics Processing Unit | Hardware accelerator for docking/MD |
 | **CPU** | Central Processing Unit | Standard processor (search docking only) |
 | **RMSD** | Root Mean Square Deviation | Measure of structural similarity |
 
@@ -307,7 +327,7 @@ Subdirectory within run directory for a specific stage's outputs.
 For detailed information, see:
 
 - **`terminology.md`** - Comprehensive definitions with examples
-- **`entry_points.md`** - All 3 entry points with required files and detection signals
+- **`entry_points.md`** - All 7 entry points with required files and detection signals
 - **`parameter_defaults.md`** - Default values for all pipeline parameters
 - **`workflow_examples.md`** - Example user requests and agent responses
 - **`directory_structure.md`** - Output organization patterns

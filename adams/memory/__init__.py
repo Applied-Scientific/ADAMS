@@ -10,6 +10,7 @@ from .persistent_memory import (
     update_user_preference,
 )
 from .session_memory import (
+    add_session_plan_path,
     add_session_tags,
     continue_session,
     get_all_tags,
@@ -43,6 +44,7 @@ __all__ = [
     "list_sessions",
     "get_session_trace_path",
     "set_session_description",
+    "add_session_plan_path",
     "set_session_tags",
     "continue_session",
     "get_session_plan_summary",

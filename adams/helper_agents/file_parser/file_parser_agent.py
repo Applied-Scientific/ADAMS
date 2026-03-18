@@ -1,7 +1,5 @@
 """
-    File Parser Agent - Extracts structured statistics from pipeline outputs
-    (docking results CSV) to enable parameter extraction and
-    result-based decision making.
+File Parser Agent - Extracts structured statistics from pipeline outputs.
 """
 
 from pathlib import Path
@@ -9,25 +7,25 @@ from pathlib import Path
 from agents import Agent, ModelSettings, function_tool
 
 from ...pipeline.references.reference_file_reader import read_reference_file
-from .file_parser_tools import parse_docking_results_impl
+from .file_parser_tools import parse_docking_results_impl, parse_md_results_impl
 
 
 @function_tool
 def parse_docking_results(csv_path: str) -> dict:
     """
-    Parse docking results CSV and extract statistics for parameter decisions.
+    Parse docking results CSV and extract compact statistics.
 
     This function reads a docking results CSV file (e.g., production_docking_results.csv)
     and extracts comprehensive statistics including affinity metrics, pose counts,
-    pocket analysis, and affinity distributions. Use this to extract optimal parameters
-    from previous run results or to summarize docking outcomes.
+    pocket analysis, and affinity distributions. Use this to summarize docking outcomes
+    or provide evidence for downstream decisions.
 
     Use this when:
-    - You need to inform parameter choices based on pose counts per ligand
-    - You want to analyze affinity distribution to inform parameter decisions
+    - You want to summarize affinity and pose-count behavior
+    - You need evidence about available poses per ligand or pocket
     - You need to identify which pockets had the best results
     - You want to summarize docking results for the user
-    - You need to extract statistics to recommend next-step parameters
+    - You want compact evidence instead of loading the CSV into prompt context
 
     Args:
         csv_path (str): Path to docking results CSV file. Can be relative to agent_data
@@ -72,16 +70,83 @@ def parse_docking_results(csv_path: str) -> dict:
     return parse_docking_results_impl(csv_path)
 
 
+@function_tool
+def parse_md_results(md_dir: str) -> dict:
+    """
+    Analyze MD results directory and extract completion status.
+
+    This function analyzes an MD analysis directory structure and extracts
+    completion status, pose statistics, and file paths. It checks for
+    protein topology files, prepared poses, completed MD simulations,
+    and analysis reports. Use this to check MD completion status and
+    identify which poses have completed simulations.
+
+    Use this when:
+    - You need to check if MD simulations have completed
+    - You want to identify which poses have completed MD simulations
+    - You need to find analysis reports from MD runs
+    - You want to verify MD pipeline completion status
+    - You need to determine if MD results are ready for downstream analysis
+
+    Args:
+        md_dir (str): Path to MD analysis directory or parent directory containing md_analysis/.
+            Can be relative to agent_data root or an absolute path.
+            Examples:
+            - "outputs/run_20251203/md_analysis" (direct path to md_analysis directory)
+            - "outputs/run_20251203" (parent directory, will automatically look for md_analysis/ subdirectory)
+
+    Returns:
+        dict: Dictionary containing:
+            - 'md_dir' (str): Full path to MD analysis directory
+            - 'completion_status' (dict): Completion status for each stage:
+                - 'protein_topology_complete' (bool): True if protein.gro and topol.top exist
+                - 'ligand_prep_complete' (bool): True if poses/ directory has subdirectories
+                - 'md_simulations_complete' (int): Count of pose directories with md.tpr, md.xtc, md.gro
+                - 'analysis_complete' (bool): True if reports/ contains analysis CSV files
+            - 'pose_statistics' (dict): Statistics about poses:
+                - 'total_poses_prepared' (int): Number of pose subdirectories
+                - 'poses_with_md_complete' (int): Number of poses with completed MD simulations
+                - 'poses_with_analysis' (int): Number of poses with analysis files
+            - 'file_paths' (dict): Paths to key files:
+                - 'protein_gro' (str or None): Path to protein.gro (if exists)
+                - 'protein_top' (str or None): Path to topol.top (if exists)
+                - 'analysis_reports' (list): List of paths to analysis CSV files
+                - 'pose_directories' (list): List of pose directory paths
+            - 'error' (str or None): Error message if parsing failed, None if successful
+
+    Example:
+        >>> result = parse_md_results("outputs/run_20251203")
+        >>> # Returns completion status and statistics
+        >>> print(result['completion_status']['md_simulations_complete'])  # 45
+        >>> print(result['pose_statistics']['total_poses_prepared'])  # 50
+        >>> print(result['file_paths']['analysis_reports'])  # ['path/to/report.csv']
+    """
+    return parse_md_results_impl(md_dir)
+
+
 prompt_path = Path(__file__).parent / "file_parser_prompt.md"
 system_prompt = prompt_path.read_text()
 
-file_parser_agent = Agent(
-    model="gpt-5-mini",
-    name="File Parser Agent",
-    instructions=system_prompt,
-    tools=[
-        read_reference_file,
-        parse_docking_results,
-    ],
-    model_settings=ModelSettings(tool_choice="auto"),
-)
+_file_parser_agent = None
+_file_parser_model = None
+
+
+def get_file_parser_agent() -> Agent:
+    global _file_parser_agent, _file_parser_model
+    from ...model_config import get_current_model_name, get_resolved_model
+
+    current_model = get_current_model_name()
+    if _file_parser_agent is None or _file_parser_model != current_model:
+        _file_parser_agent = Agent(
+            model=get_resolved_model(),
+            name="File Parser Agent",
+            instructions=system_prompt,
+            tools=[
+                read_reference_file,
+                parse_docking_results,
+                parse_md_results,
+            ],
+            model_settings=ModelSettings(tool_choice="auto"),
+        )
+        _file_parser_model = current_model
+    return _file_parser_agent

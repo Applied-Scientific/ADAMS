@@ -1,0 +1,47 @@
+; membrane_nvt.mdp - NVT equilibration for membrane system
+; Base POSRES restraints from the imported topology; temperature stabilization
+title                   = Membrane system NVT equilibration
+define                  = -DPOSRES
+; Run parameters
+integrator              = md
+nsteps                  = 50000     ; 2 * 50000 = 100 ps
+dt                      = 0.002
+; Output control
+nstenergy               = 500
+nstlog                  = 500
+nstxout-compressed      = 500
+; Bond parameters
+continuation            = no
+constraint_algorithm    = lincs
+constraints             = h-bonds
+lincs_iter              = 1
+lincs_order             = 4
+; Neighbor searching and vdW
+cutoff-scheme           = Verlet
+ns_type                 = grid
+nstlist                 = 20
+rlist                   = 1.2
+vdwtype                 = cutoff
+vdw-modifier            = force-switch
+rvdw-switch             = 1.0
+rvdw                    = 1.2
+; Electrostatics
+coulombtype             = PME
+rcoulomb                = 1.2
+pme_order               = 4
+fourierspacing          = 0.16
+; Temperature coupling - three groups for membrane systems
+tcoupl                  = V-rescale
+tc-grps                 = Protein Membrane Solvent_and_ions
+tau_t                   = 0.1     0.1      0.1
+ref_t                   = 300     300      300
+; No pressure coupling in NVT
+pcoupl                  = no
+; Periodic boundary conditions
+pbc                     = xyz
+; Dispersion correction
+DispCorr                = no
+; Velocity generation
+gen_vel                 = yes
+gen_temp                = 300
+gen_seed                = -1
